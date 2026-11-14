@@ -1,0 +1,10 @@
+.mobile-menu{display:none;border:0;background:none;color:#747381;font-size:17px;padding:4px}
+.mobile-scrim{display:none}
+@media(max-width:760px){
+  .sidebar{transform:translateX(-102%)}
+  .sidebar.shown{transform:translateX(0)}
+  .mobile-menu{display:block}
+  .mobile-scrim{display:block;position:fixed;inset:0;z-index:4;border:0;background:#17152255}
+  .topbar{justify-content:flex-start;gap:12px}
+  .privacy-status{margin-left:auto}
+}
