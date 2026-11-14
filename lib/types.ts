@@ -39,6 +39,9 @@ export type SimilarOpportunity = { title: string; url: string; highlights: strin
 export type Opportunity = {
   id: string; title: string; company: string; type: string; location: string;
   summary: string; deadline: string | null; status: "Verified open" | "Possibly open" | "Unknown" | "Closed";
+  availabilityStatus?: "Open" | "Upcoming" | "Closed" | "Unverified";
+  classificationReason?: string;
+  classificationEvidence?: string;
   match: number; matchReason: string; requirements: string[]; source: { title: string; url: string; excerpt: string };
   matchedSkills?: string[];
   locationMatch?: "match" | "mismatch" | "unknown";
@@ -58,6 +61,8 @@ export type Opportunity = {
   outreachDraftVersion?: 2;
   publishedDate?: string; saved?: boolean; stage?: string; checklist?: ChecklistItem[];
 };
+
+export type RelatedInformation = { id: string; title: string; url: string; excerpt: string; category: string; reason: string };
 
 export type ChecklistItem = { id: string; label: string; status: "Ready" | "Missing" | "Needs review" | "Needs confirmation" | "Completed" };
 

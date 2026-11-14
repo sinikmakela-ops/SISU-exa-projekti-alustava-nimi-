@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
 import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation, type SourceClassification } from "@/lib/opportunity-classification";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -59,7 +60,6 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
   const excerpt = [raw.text, ...(raw.highlights ?? []), raw.summary].filter((value): value is string => typeof value === "string" && Boolean(value.trim())).join("\n");
   if (!url) return null;
   const classification = classifyOpportunity(title, excerpt);
-  if (!classification.eligible) return null;
   const host = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "Organization"; } })();
   const titleParts = title.split(/\s+[–—-]\s+/);
   const sourceText = excerpt.slice(0, 2400);
@@ -75,7 +75,7 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
   const applicationStatus = expiredByEvidence ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadlineEvidence?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : opportunityStatus;
   const provisional: Partial<Opportunity> = {
     title: titleParts[0] || title,
-    type: classification.type,
+    type: classification.eligible ? classification.type : "Student opportunity",
     summary: String(raw.summary ?? sourceText.slice(0, 250)),
     deadline: exactDeadline,
     status: opportunityStatus,
@@ -88,7 +88,7 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
     id: String(raw.id ?? url),
     title: titleParts[0] || title,
     company: location,
-    type: classification.type,
+    type: classification.eligible ? classification.type : "Student opportunity",
     location: provisional.location || "Location not specified",
     summary: String(raw.summary ?? sourceText.slice(0, 250) ?? "Source found by Exa."),
     deadline: exactDeadline ?? provisional.deadline ?? null,
@@ -176,15 +176,59 @@ export async function POST(request: Request) {
       else merged.set(key, { ...prior, ...page, text: [prior.text, page.text].filter(Boolean).join("\n"), highlights: [...new Set([...(prior.highlights ?? []), ...(page.highlights ?? [])])], summary: prior.summary || page.summary });
     }
     const rawPages = [...merged.values()];
-    const normalized = rawPages
-      .map((item) => normalize(item, query, body.profile ?? {}, now))
-      .filter((item): item is Opportunity => item !== null)
-      .filter((item) => isAllowedRoleMode(item.title, item.source.excerpt, inferOpportunityRoleMode(query, body.profile?.roleMode)));
-    const sourceDomains = [...new Set(normalized.flatMap((item) => { try { return [new URL(item.source.url).hostname.replace(/^www\./, "")]; } catch { return []; } }))];
+    const looksPromising = (page: ExaPage) => /\b(intern(ship)?|trainee(ship)?|summer student|student assistant|research assistant|thesis|diplomity[oö]|gradutoimeksianto|student (program(me)?|fellowship|opportunity)|fellowship for students|scholarship for students|careers|how to apply)\b/i.test(`${page.title ?? ""} ${page.url ?? ""} ${page.text ?? ""} ${(page.highlights ?? []).join(" ")}`)
+      && !/linkedin\.com\/in\/|\/people\/|\/staff\/|\/profile\//i.test(`${page.url ?? ""} ${page.title ?? ""}`);
+    const contentCandidates = rawPages.filter(looksPromising).slice(0, 18);
+    const contentFailures: string[] = [];
+    const contentByUrl = new Map<string, ExaPage>();
+    if (contentCandidates.length) {
+      try {
+        const response = await exaRequest<{ results?: ExaPage[] }>("/contents", { urls: contentCandidates.map((page) => page.url).filter((url): url is string => Boolean(url)), ...CONTENT_OPTIONS });
+        for (const page of response.results ?? []) if (page.url) contentByUrl.set(page.url.replace(/\/$/, "").toLowerCase(), page);
+      } catch (error) {
+        contentFailures.push(error instanceof Error ? error.message : "Exa could not retrieve candidate pages.");
+      }
+    }
+
+    const sourceReviews = rawPages.map((raw) => {
+      const url = String(raw.url ?? "").replace(/\/$/, "").toLowerCase();
+      const pageContent = contentByUrl.get(url);
+      const searchText = [raw.text, ...(raw.highlights ?? []), raw.summary].filter((value): value is string => Boolean(value)).join("\n");
+      const fullText = pageContent ? [pageContent.text, ...(pageContent.highlights ?? []), pageContent.summary].filter((value): value is string => Boolean(value)).join("\n") : searchText;
+      const isCandidate = looksPromising(raw);
+      const classification = isCandidate && !pageContent
+        ? { category: "unretrievable", availability: null, reason: contentFailures.length ? "The candidate page could not be retrieved, so APPLYOS cannot verify it." : "This specific-looking result was not among the source pages retrieved for verification.", evidenceExcerpt: null, applicationRoute: "none" } as SourceClassification
+        : classifyOpportunitySource({ title: raw.title ?? "Untitled source", url: raw.url ?? "", text: fullText, deadlineIsPast: parseOpportunityDeadline(fullText, raw.highlights ?? [], now.toISOString().slice(0, 10))?.isPast });
+      return { raw, pageContent, fullText, classification };
+    });
+
+    const sourceCounts = sourceReviews.reduce<Record<string, number>>((counts, review) => {
+      counts[review.classification.category] = (counts[review.classification.category] ?? 0) + 1;
+      return counts;
+    }, {});
+    const relatedInformation: RelatedInformation[] = sourceReviews.flatMap(({ raw, classification }) => isUsefulRelatedInformation(classification) && raw.url ? [{ id: String(raw.id ?? raw.url), title: raw.title ?? "Application guidance", url: raw.url, excerpt: classification.evidenceExcerpt ?? "", category: classification.category, reason: classification.reason }] : []);
+
+    const candidateReviews = sourceReviews.filter(({ classification, pageContent }) => pageContent && classification.category === "specific-opportunity");
+    const uniqueCandidates = new Map<string, typeof candidateReviews[number]>();
+    for (const review of candidateReviews) {
+      const key = opportunityDeduplicationKey(review.raw.title ?? "", review.raw.url ?? "");
+      const existing = uniqueCandidates.get(key);
+      if (!existing || review.classification.availability === "Open" || review.classification.availability === "Upcoming") uniqueCandidates.set(key, review);
+    }
+    const sourceDomains = [...new Set([...uniqueCandidates.values()].flatMap(({ raw }) => { try { return [new URL(raw.url!).hostname.replace(/^www\./, "")]; } catch { return []; } }))];
+
+    const verifiedTextById = new Map<string, string>();
+    const specificCandidates = [...uniqueCandidates.values()].flatMap(({ raw, fullText, classification }) => {
+      const item = normalize({ ...raw, text: fullText, highlights: [] }, query, body.profile ?? {}, now);
+      if (!item || !isAllowedRoleMode(item.title, fullText, inferOpportunityRoleMode(query, body.profile?.roleMode))) return [];
+      const evidence = classification.evidenceExcerpt ?? "";
+      verifiedTextById.set(item.id, fullText);
+      return [{ ...item, status: opportunityAvailabilityStatus(classification.availability ?? "Unverified"), availabilityStatus: classification.availability ?? "Unverified", classificationReason: classification.reason, classificationEvidence: evidence, source: { ...item.source, excerpt: evidence } }];
+    });
 
     const constraints = parseSearchConstraints(query, body.profile ?? {});
-    const constrained = normalized.map((item) => {
-      const fullText = `${item.title} ${item.summary} ${item.source.excerpt}`;
+    const constrained = specificCandidates.map((item) => {
+      const fullText = `${item.title} ${item.summary} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`;
       const deadline = parseOpportunityDeadline(fullText, [], now.toISOString().slice(0, 10));
       const cycle = extractProgramCycle(fullText, now.toISOString().slice(0, 10));
       const academicCycle = extractAcademicCycle(fullText, now.toISOString().slice(0, 10));
@@ -198,18 +242,19 @@ export async function POST(request: Request) {
       const travelConflict = constraints.excludeTravel && /travel required|must be willing to travel/i.test(fullText);
       const mismatch = placeMatch === "mismatch" ? [`Requested location (${constraints.locations.join(", ")}) is not supported by this source`] : [];
       const conflict = degreeConflict || travelConflict;
-      const closed = Boolean(deadlinePast || cycle?.isPast || academicCycle?.isPast || item.status === "Closed");
+      const closed = Boolean(deadlinePast || cycle?.isPast || academicCycle?.isPast || item.availabilityStatus === "Closed");
       const applicationStatus = closed ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadline?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : item.applicationStatus ?? item.status;
-      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
+      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, availabilityStatus: closed ? "Closed" as const : item.availabilityStatus, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
     });
-    const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${item.source.excerpt}`, item.source.url), constraints, `${item.title} ${item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
+    const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`, item.source.url), constraints, `${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
       return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
     });
-    const filteredOutExpired = ranked.filter((item) => item.applicationStatus === "Closed").length;
-    const active = ranked.filter((item) => item.applicationStatus !== "Closed").sort((a, b) => {
+    const closedResults = ranked.filter((item) => item.availabilityStatus === "Closed");
+    const unverifiedOpportunities = ranked.filter((item) => item.availabilityStatus === "Unverified");
+    const active = ranked.filter((item) => item.availabilityStatus === "Open" || item.availabilityStatus === "Upcoming").sort((a, b) => {
       const priority = (item: Opportunity) => {
         const published = item.publishedDate ? Date.parse(item.publishedDate) : NaN;
         const fresh = Number.isFinite(published) && published <= now.getTime() ? Math.max(0, 8 - Math.floor((now.getTime() - published) / (15 * 24 * 60 * 60 * 1000))) : 0;
@@ -222,22 +267,35 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       opportunities: active,
+      closedOpportunities: closedResults,
+      unverifiedOpportunities,
+      relatedInformation,
       constraintSummary: eligible.length === 0 && (constraints.locations.length > 0 || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
       constraintExplanation: !active.length && constraints.locations.length && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
+        sourceAudit: sourceReviews.map(({ raw, classification }) => ({ title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason: classification.reason, evidenceExcerpt: classification.evidenceExcerpt })),
         freshnessStart: plan.find((item) => item.startPublishedDate)?.startPublishedDate ?? null,
         sources: rawPages.length,
         fetched: rawPages.length,
-        studentRoles: normalized.length,
+        studentRoles: candidateReviews.length,
+        opportunityPages: candidateReviews.length,
+        guidancePages: sourceCounts["application-guidance"] ?? 0,
+        overviewPages: sourceCounts["organization-overview"] ?? 0,
+        profilePages: sourceCounts["personal-profile"] ?? 0,
+        archivedPages: sourceCounts["archived-work"] ?? 0,
+        irrelevantPages: sourceCounts.irrelevant ?? 0,
+        unverifiablePages: sourceCounts.unretrievable ?? 0,
         constraintMatches: eligible.length,
         excludedByConstraints: constrained.length - eligible.length,
-        closedExcluded: filteredOutExpired,
-        duplicatesMerged: successful.reduce((total, run) => total + run.results.length, 0) - rawPages.length,
+        closedExcluded: closedResults.length,
+        duplicatesMerged: successful.reduce((total, run) => total + run.results.length, 0) - rawPages.length + candidateReviews.length - uniqueCandidates.size,
         sourceDomains,
         roleMode: inferOpportunityRoleMode(query, body.profile?.roleMode),
         returned: active.length,
-        filteredOutExpired,
+        filteredOutExpired: closedResults.length,
+        failedContents: contentFailures,
+        contentsReviewed: contentByUrl.size,
         researchedAt: now.toISOString(),
         failedQueries,
         usedOpenAI: Boolean(process.env.OPENAI_API_KEY),

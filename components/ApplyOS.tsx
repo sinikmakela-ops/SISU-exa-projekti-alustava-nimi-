@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
-import type { ChecklistItem, InvestigationData, Opportunity, Profile, SimilarOpportunity } from "@/lib/types";
+import type { ChecklistItem, InvestigationData, Opportunity, Profile, RelatedInformation, SimilarOpportunity } from "@/lib/types";
 
 const scenarios = [
   ["Suomi · Tampere · tuotantotalous", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."],
@@ -31,9 +31,12 @@ export default function ApplyOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
   const [results, setResults] = useState<Opportunity[]>([]);
+  const [closedResults, setClosedResults] = useState<Opportunity[]>([]);
+  const [unverifiedResults, setUnverifiedResults] = useState<Opportunity[]>([]);
+  const [relatedInformation, setRelatedInformation] = useState<RelatedInformation[]>([]);
   const [constraintExplanation, setConstraintExplanation] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [activity, setActivity] = useState<{ queries: string[]; sources: number; fetched?: number; studentRoles?: number; constraintMatches?: number; excludedByConstraints?: number; duplicatesMerged?: number; sourceDomains?: string[]; roleMode?: string; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }>; filteredOutExpired?: number; returned?: number } | null>(null);
+  const [activity, setActivity] = useState<{ queries: string[]; sources: number; sourceAudit?: Array<{ title: string; url: string; category: string; reason: string; evidenceExcerpt: string | null }>; fetched?: number; contentsReviewed?: number; studentRoles?: number; opportunityPages?: number; guidancePages?: number; overviewPages?: number; profilePages?: number; archivedPages?: number; irrelevantPages?: number; unverifiablePages?: number; constraintMatches?: number; excludedByConstraints?: number; duplicatesMerged?: number; sourceDomains?: string[]; roleMode?: string; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }>; failedContents?: string[]; filteredOutExpired?: number; returned?: number } | null>(null);
   const [screen, setScreen] = useState<"discover" | "profile" | "apps">("discover");
   const [selected, setSelected] = useState<Opportunity | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,13 +68,13 @@ export default function ApplyOS() {
   async function search(value: string, roleModeOverride?: Profile["roleMode"]) {
     const q = value.trim();
     if (!q || busy) return;
-    setQuery(q); setError(""); setConstraintExplanation(null); setBusy(true); setResults([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
+    setQuery(q); setError(""); setConstraintExplanation(null); setBusy(true); setResults([]); setClosedResults([]); setUnverifiedResults([]); setRelatedInformation([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
     try {
       const searchProfile = roleModeOverride ? { ...profile, roleMode: roleModeOverride } : profile;
       const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile: searchProfile }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not search right now.");
-      setResults(data.opportunities || []); setConstraintExplanation(data.constraintSummary || data.constraintExplanation || null); setActivity(data.activity || null);
+      setResults(data.opportunities || []); setClosedResults(data.closedOpportunities || []); setUnverifiedResults(data.unverifiedOpportunities || []); setRelatedInformation(data.relatedInformation || []); setConstraintExplanation(data.constraintSummary || data.constraintExplanation || null); setActivity(data.activity || null);
     } catch (e) { setError(e instanceof Error ? e.message : "Search failed."); }
     finally { setBusy(false); }
   }
@@ -219,18 +222,20 @@ export default function ApplyOS() {
             <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Or describe your own opportunity search..." aria-label="Describe your opportunity search"/><select aria-label="Filter by opportunity type" value={profile.roleMode ?? "auto"} onChange={(e) => setProfile((p) => ({ ...p, roleMode: e.target.value as Profile["roleMode"] }))}><option value="auto">Infer type</option><option value="internship">Internships only</option><option value="thesis">Thesis roles only</option><option value="both">Both types</option></select><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
           </section>
           {error && <div className="error-banner"><b>Research paused</b><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
-          {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking real sources and reading original pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Reading original sources</span><span>Ranking your matches</span></div></div> : results.length ? <section className="results">
-            <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{results.length} opportunities to explore</h2><p>Sorted by how closely each source fits your search.</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
-            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {formatSafeTimestamp(activity.researchedAt)}</span><em>See queries +</em></summary>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {formatSafeTimestamp(activity.freshnessStart)} · thesis search remains broad.</p>}<ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}</details>}
+          {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking live sources and verifying promising pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Verifying original pages</span><span>Ranking confirmed matches</span></div></div> : results.length || closedResults.length || unverifiedResults.length || relatedInformation.length || error || activity ? <section className="results">
+            <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{results.length} verified opportunities</h2><p>Only specific source-backed student opportunities appear in this list.</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
+            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Reviewed {activity.sources} Exa results and retrieved content for {activity.contentsReviewed ?? 0} promising pages · {formatSafeTimestamp(activity.researchedAt)}</span><em>See what we found +</em></summary><p className="freshness-note">{activity.opportunityPages ?? 0} verified specific opportunities · {activity.guidancePages ?? 0} guidance · {activity.profilePages ?? 0} profiles · {activity.archivedPages ?? 0} archives · {activity.overviewPages ?? 0} organization pages · {activity.irrelevantPages ?? 0} unrelated · {activity.unverifiablePages ?? 0} could not be verified.</p>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {formatSafeTimestamp(activity.freshnessStart)} · thesis search remains broad.</p>}<SourceAuditList sources={activity.sourceAudit ?? []}/><ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}{activity.failedContents?.length ? <div className="partial-warning"><b>Some promising pages could not be verified.</b>{activity.failedContents.map((item, index) => <p key={index}>{item}</p>)}</div> : null}</details>}
             {constraintExplanation && <div className="partial-warning">{constraintExplanation}</div>}
-            {activity && results.length > 1 && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}
-            {activity && results.length <= 1 && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}
-            {activity && results.length <= 1 && <CoverageCard activity={activity} resultCount={results.length}/>}
             <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div>
+            {!results.length && <EmptyResults query={query} error={error} explanation={constraintExplanation || "The sources did not confirm a specific current or upcoming student opportunity."} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>}
+            {unverifiedResults.length > 0 && <section className="separated-results"><h3>Specific opportunities · availability unverified</h3><p>These sources describe a real student opportunity and a way to pursue it, but do not confirm that it is open now or opening soon.</p><div className="result-list">{unverifiedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div></section>}
+            {closedResults.length > 0 && <details className="separated-results closed-results"><summary>Show {closedResults.length} closed opportunities</summary><p>These were specific roles, but their sources say they are closed or their deadline has passed.</p><div className="result-list">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div></details>}
+            {relatedInformation.length > 0 && <RelatedInformationPanel items={relatedInformation}/>}
+            {activity && <CoverageCard activity={activity} resultCount={results.length}/>}
             <p className="disclaimer">ⓘ Opportunity availability can change. Always confirm status and requirements with the organization.</p>
           </section> : <section className="starter"><div className="section-head"><div><label>YOUR STARTING POINT</label><h2>A little context goes a long way.</h2></div><span>A more complete profile means closer matches.</span></div><div className="starter-grid"><button className="starter-card" onClick={() => setScreen("profile")}><i className="purple">♙</i><span><b>Build your profile</b><small>{profile.field || "Add your studies, skills and interests"}</small></span><strong>→</strong><div className="progress"><i style={{ width: [profile.field, profile.skills, profile.university, profile.interests].filter(Boolean).length * 25 + "%" }}/></div></button><button className="starter-card" onClick={() => setScreen("apps")}><i className="green">▱</i><span><b>Save your first opportunity</b><small>{apps.length ? apps.length + " saved in your workspace" : "Keep interesting roles in one place"}</small></span><strong>→</strong><div className="progress"><i style={{ width: apps.length ? "100%" : "0%" }}/></div></button></div><div className="privacy-message"><b>⌑ &nbsp; Your profile stays yours.</b><span>Personal details stay on this device. Only broad, non-identifying search criteria go to Exa.</span></div></section>}
         </>}
-        {screen === "discover" && hasSearched && !busy && !results.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>{activity && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}{activity && <CoverageCard activity={activity} resultCount={0}/>}</>}
+        {screen === "discover" && hasSearched && !busy && !activity && !error && !results.length && !closedResults.length && !unverifiedResults.length && !relatedInformation.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/></>}
       </div>
       <footer><b>✳ APPLYOS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
     </section>
@@ -258,6 +263,14 @@ function SimilarPanel({ state }: { state?: { loading: boolean; results: SimilarO
   </div>;
 }
 
+function RelatedInformationPanel({ items }: { items: RelatedInformation[] }) {
+  return <details className="separated-results related-information"><summary>Application guidance and related pages ({items.length})</summary><p>Useful background pages are shown separately because they do not prove a specific student opening.</p><ul>{items.map((item) => <li key={item.id}><b>{item.title}</b><p>{item.reason}</p>{item.excerpt && <blockquote>“{item.excerpt}”</blockquote>}{safeHttpsUrl(item.url) && <a href={safeHttpsUrl(item.url) ?? undefined} target="_blank" rel="noopener noreferrer">Open source ↗</a>}</li>)}</ul></details>;
+}
+
+function SourceAuditList({ sources }: { sources: Array<{ title: string; url: string; category: string; reason: string; evidenceExcerpt: string | null }> }) {
+  return <details className="source-audit"><summary>Review each source ({sources.length})</summary><ul>{sources.map((source, index) => <li key={`${source.url}-${index}`}><b>{source.category.replaceAll("-", " ")}</b><span>{source.title}</span><p>{source.reason}</p>{source.evidenceExcerpt && <blockquote>“{source.evidenceExcerpt}”</blockquote>}{safeHttpsUrl(source.url) && <a href={safeHttpsUrl(source.url) ?? undefined} target="_blank" rel="noopener noreferrer">Source ↗</a>}</li>)}</ul></details>;
+}
+
 function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query: string; error: string; explanation?: string | null; onRetry: () => void; onBroader: (query: string) => void }) {
   return <section className="empty-results">
     <div className="empty-results-icon">{error ? "!" : "⌕"}</div>
@@ -269,7 +282,7 @@ function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query
   </section>;
 }
 
-function CoverageCard({ activity, resultCount }: { activity: { queries: string[]; sources: number; fetched?: number; studentRoles?: number; constraintMatches?: number; excludedByConstraints?: number; duplicatesMerged?: number; sourceDomains?: string[]; roleMode?: string; filteredOutExpired?: number; failedQueries?: Array<{ query: string; error: string }> }; resultCount: number }) {
+function CoverageCard({ activity, resultCount }: { activity: { queries: string[]; sources: number; fetched?: number; studentRoles?: number; opportunityPages?: number; guidancePages?: number; overviewPages?: number; profilePages?: number; archivedPages?: number; irrelevantPages?: number; unverifiablePages?: number; constraintMatches?: number; excludedByConstraints?: number; duplicatesMerged?: number; sourceDomains?: string[]; roleMode?: string; filteredOutExpired?: number; failedQueries?: Array<{ query: string; error: string }> }; resultCount: number }) {
   return <section className="coverage-card"><div><small>SEARCH SCOPE & COVERAGE</small><b>{resultCount === 0 ? "No active matching roles surfaced." : `${resultCount} active opportunities surfaced.`}</b><p>Exa returned {activity.fetched ?? activity.sources} distinct source URLs across {activity.queries.length} complementary queries. {activity.studentRoles ?? 0} looked like student roles; {activity.excludedByConstraints ?? 0} were removed by hard constraints; {activity.filteredOutExpired ?? 0} closed or expired results are hidden. Type filter: {activity.roleMode ?? "inferred from query"}. Search coverage describes returned sources, not the full job market.</p></div><details><summary>Live source domains, queries & filtering</summary><p>{activity.duplicatesMerged ?? 0} duplicate URLs merged. {activity.constraintMatches ?? 0} sources passed constraints.</p>{activity.sourceDomains?.length ? <ul>{activity.sourceDomains.map((domain) => <li key={domain}>{domain}</li>)}</ul> : <p>No source domains were returned.</p>}<ul>{activity.queries.map((query) => <li key={query}>{query}</li>)}</ul>{activity.failedQueries?.map((failure) => <p key={failure.query}>A query failed: {failure.error}</p>)}</details></section>;
 }
 
@@ -282,12 +295,14 @@ function OpportunityCard({ item, saved, index, similar, onSave, onOpen, onSimila
   onOpen: () => void;
   onSimilar: () => void;
 }) {
-  const isOpen = item.status === "Verified open" || item.status === "Possibly open";
+  const statusLabel = item.availabilityStatus ?? (item.status === "Verified open" ? "Open" : item.status === "Possibly open" ? "Upcoming" : item.status);
+  const isOpen = statusLabel === "Open" || statusLabel === "Upcoming";
   const published = item.publishedDate && !Number.isNaN(Date.parse(item.publishedDate)) ? new Date(item.publishedDate).toLocaleDateString() : "Publication date unknown";
   return <article className="opportunity" style={{ animationDelay: index * 60 + "ms" }}>
     <div className="opportunity-head"><span className={"company-mark mark-" + (index % 4)}>{item.company.slice(0, 2).toUpperCase()}</span><div className="company-info"><div><b>{item.company}</b><span className="source-found">◉ Source found</span></div><h3>{item.title}<i>{item.type}</i></h3></div><button className={saved ? "bookmark saved" : "bookmark"} onClick={onSave} aria-label={saved ? "Remove saved opportunity" : "Save opportunity"}>{saved ? "♥" : "♡"}</button></div>
     <div className="opportunity-badges"><span className="role-badge">{item.type}</span><span className="published-badge">◷ Published · {published}</span></div>
-    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.locationLabel || item.location}{item.locationSnippet ? ` · “${item.locationSnippet}”` : ""}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : item.programCycle ? "Program cycle · " + item.programCycle : "Deadline not verified"}</span><span className={isOpen ? "status open" : "status"}><i/>{item.applicationStatus || item.status}</span></div>
+    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.locationLabel || item.location}{item.locationSnippet ? ` · “${item.locationSnippet}”` : ""}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : item.programCycle ? "Program cycle · " + item.programCycle : "Deadline not verified"}</span><span className={isOpen ? "status open" : "status"}><i/>{statusLabel}</span></div>
+    {item.classificationReason && <p className="classification-reason">{item.classificationReason}</p>}
     <div className="match"><span><i style={{ width: item.match + "%" }}/></span><b>{item.match}% match</b><em>· {item.matchReason}</em></div>
     {item.eligibilityStatus?.startsWith("Constraint check:") && <span className="constraint-badge">{item.eligibilityStatus}</span>}
     {item.scoreBreakdown && <div className="score-breakdown" aria-label="Match score breakdown">{Object.entries({ Base: item.scoreBreakdown.base, "Topic / skills": item.scoreBreakdown.topicSkill, "Student role": item.scoreBreakdown.studentRole, Location: item.scoreBreakdown.location, "Open status": item.scoreBreakdown.openStatus, "Missing location": item.scoreBreakdown.missingLocation, "Missing deadline": item.scoreBreakdown.missingDeadline, "Constraint conflict": item.scoreBreakdown.constraintConflict, "Score clamp": item.scoreBreakdown.clampAdjustment }).filter(([, points]) => points !== 0).map(([label, points]) => <span key={label}>{label} {Number(points) > 0 ? "+" : ""}{points}</span>)}</div>}
