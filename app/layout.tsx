@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./styles.css";
 import "./mobile.css";
+import "./opportunity-details.css";
 
 export const metadata: Metadata = {
   title: "APPLYOS — Your next opportunity starts here",

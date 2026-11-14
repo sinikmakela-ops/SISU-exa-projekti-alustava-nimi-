@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChecklistItem, Opportunity, Profile } from "@/lib/types";
+import type { ChecklistItem, InvestigationData, Opportunity, Profile, SimilarOpportunity } from "@/lib/types";
 
 const scenarios = [
-  ["AI research · Finland", "I'm studying computer science in Finland and looking for an AI research internship or master's thesis opportunity."],
-  ["Sustainability · thesis", "I'm a business master's student interested in sustainability and consulting. Find thesis opportunities in Finland."],
-  ["Engineering · Europe", "I'm studying mechanical engineering and want a paid internship in Europe."],
-  ["Suomeksi", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."]
+  ["Suomi · Tampere · tuotantotalous", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."],
+  ["AI + robotics · thesis", "I'm looking for a master's thesis in AI or robotics, ideally in Finland or Europe."],
+  ["Sustainability · business thesis", "I'm a business master's student interested in sustainability. Find thesis opportunities in Finland."],
+  ["Mechanical engineering · Europe", "I'm studying mechanical engineering and looking for an internship in Europe."]
 ];
 const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", cvText: "" };
+const manualDocumentOptions = ["CV", "Academic Transcript / Opintosuoritusote", "Portfolio / GitHub", "Motivation Letter"];
 const checklistDefaults: ChecklistItem[] = [
   { id: "cv", label: "CV", status: "Needs review" }, { id: "transcript", label: "Academic transcript", status: "Needs confirmation" },
   { id: "letter", label: "Motivation letter", status: "Needs confirmation" }, { id: "channel", label: "Application channel", status: "Needs confirmation" },
@@ -17,13 +18,17 @@ const checklistDefaults: ChecklistItem[] = [
 ];
 
 function persist(key: string, value: unknown) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Local storage may be unavailable. */ } }
+function safeDateTime(value?: string | null) { if (!value || Number.isNaN(Date.parse(value))) return "Just now"; return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
 export default function ApplyOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
   const [results, setResults] = useState<Opportunity[]>([]);
+  const [closedResults, setClosedResults] = useState<Opportunity[]>([]);
+  const [showClosed, setShowClosed] = useState(false);
+  const [constraintExplanation, setConstraintExplanation] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [activity, setActivity] = useState<{ queries: string[]; sources: number; researchedAt: string } | null>(null);
+  const [activity, setActivity] = useState<{ queries: string[]; sources: number; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }> } | null>(null);
   const [screen, setScreen] = useState<"discover" | "profile" | "apps">("discover");
   const [selected, setSelected] = useState<Opportunity | null>(null);
   const [busy, setBusy] = useState(false);
@@ -33,6 +38,8 @@ export default function ApplyOS() {
   const [summary, setSummary] = useState("");
   const [cvName, setCvName] = useState("");
   const [navOpen, setNavOpen] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [similarById, setSimilarById] = useState<Record<string, { loading: boolean; results: SimilarOpportunity[]; error: string }>>({});
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -52,13 +59,12 @@ export default function ApplyOS() {
   async function search(value: string) {
     const q = value.trim();
     if (!q || busy) return;
-    setQuery(q); setError(""); setBusy(true); setResults([]); setScreen("discover"); setSelected(null);
+    setQuery(q); setError(""); setBusy(true); setResults([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
     try {
       const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not search right now.");
-      setResults(data.opportunities || []); setActivity(data.activity || null);
-      if (!data.opportunities?.length) setMessage("No student opportunities found. Try a broader search.");
+      setResults(data.opportunities || []); setClosedResults(data.closedResults || []); setShowClosed(false); setConstraintExplanation(data.constraintExplanation || null); setActivity(data.activity || null);
     } catch (e) { setError(e instanceof Error ? e.message : "Search failed."); }
     finally { setBusy(false); }
   }
@@ -66,15 +72,35 @@ export default function ApplyOS() {
   async function investigate(item: Opportunity) {
     setResearching(true); setError("");
     try {
-      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, profile: { skills: profile.skills, cvText: profile.cvText } }) });
+      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, profile: { skills: profile.skills, cvText: profile.cvText, documents: item.manualDocuments ?? [] } }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Research failed.");
+      const investigation = data as InvestigationData;
       const checklist = (data.checklist || []).map((x: { label: string; status: ChecklistItem["status"] }, i: number) => ({ ...x, id: item.id + "-" + i }));
       setSummary(data.summary || "");
-      setSelected((current) => current ? { ...current, checklist, source: data.source || current.source } : current);
-      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, source: data.source || x.source } : x));
+      setSelected((current) => current ? { ...current, checklist, investigation } : current);
+      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, investigation } : x));
     } catch (e) { setError(e instanceof Error ? e.message : "Research failed."); }
     finally { setResearching(false); }
+  }
+
+  async function findSimilar(item: Opportunity) {
+    setSimilarById((current) => ({ ...current, [item.id]: { loading: true, results: current[item.id]?.results ?? [], error: "" } }));
+    try {
+      const response = await fetch("/api/similar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Exa could not find related sources.");
+      const results = (Array.isArray(data.results) ? data.results : []).filter((result: { url?: unknown }) => typeof result.url === "string")
+        .map((result: { title?: string; url: string; highlights?: string[]; text?: string }) => ({
+          title: result.title || new URL(result.url).hostname,
+          url: result.url,
+          highlights: Array.isArray(result.highlights) ? result.highlights.filter((value) => typeof value === "string") : [],
+          text: result.text,
+        }));
+      setSimilarById((current) => ({ ...current, [item.id]: { loading: false, results, error: "" } }));
+    } catch (cause) {
+      setSimilarById((current) => ({ ...current, [item.id]: { loading: false, results: [], error: cause instanceof Error ? cause.message : "Related source search failed." } }));
+    }
   }
 
   function toggleSave(item: Opportunity) {
@@ -85,6 +111,17 @@ export default function ApplyOS() {
   function setChecklist(id: string, key: string, status: ChecklistItem["status"]) {
     const update = (x: Opportunity) => x.id !== id ? x : { ...x, checklist: (x.checklist || []).map((c) => c.id === key ? { ...c, status } : c) };
     setApps((current) => current.map(update)); setSelected((current) => current ? update(current) : current);
+  }
+
+  function toggleManualDocument(id: string, document: string) {
+    const update = (item: Opportunity) => {
+      if (item.id !== id) return item;
+      const current = item.manualDocuments ?? [];
+      const manualDocuments = current.includes(document) ? current.filter((value) => value !== document) : [...current, document];
+      return { ...item, manualDocuments };
+    };
+    setApps((current) => current.map(update));
+    setSelected((current) => current ? update(current) : current);
   }
 
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -107,7 +144,7 @@ export default function ApplyOS() {
   }
 
   const firstName = profile.name.trim().split(/\s+/)[0] || "there";
-  return <main className="shell">
+  return <main className={"shell" + (hasSearched ? " searched" : "")}>
     <aside className={"sidebar" + (navOpen ? " shown" : "")}>
       <div className="brand"><span className="brand-icon">✳</span><b>apply<span>os</span></b></div>
       <div className="nav-label">YOUR WORKSPACE</div>
@@ -151,21 +188,25 @@ export default function ApplyOS() {
         </section> : <>
           <div className="welcome"><div><label>● &nbsp; YOUR OPPORTUNITY DESK</label><h1>Good morning, {firstName}<span>✳</span></h1><p>One profile. Every opportunity. <b>Zero research.</b></p></div><span className="welcome-note">✦ &nbsp; Your next move, made clearer</span></div>
           <section className="hero"><div className="hero-icon">✳</div><h2>What are you looking for?</h2><p>Tell us what’s next. We’ll find the opportunities and the details that matter.</p>
-            <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. A paid data science internship in Finland for spring 2027..." aria-label="Describe your opportunity search"/><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
-            <div className="scenario-row"><span>TRY A SCENARIO</span>{scenarios.map((scenario, i) => <button key={scenario[0]} className={"scenario scenario-" + i} disabled={busy} onClick={() => { setQuery(scenario[1]); void search(scenario[1]); }}><i>{["✳", "◉", "⌁", "あ"][i]}</i>{scenario[0]} <b>↗</b></button>)}</div>
+            <div className="scenario-row"><span>TRY AN EXAMPLE QUERY</span>{scenarios.map((scenario, i) => <button key={scenario[0]} className={"scenario scenario-" + i} disabled={busy} onClick={() => { setQuery(scenario[1]); void search(scenario[1]); }}><i>{["あ", "✳", "◉", "⌁"][i]}</i>Try Example Query · {scenario[0]} <b>↗</b></button>)}</div>
+            <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Or describe your own opportunity search..." aria-label="Describe your opportunity search"/><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
           </section>
           {error && <div className="error-banner"><b>Research paused</b><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
           {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking real sources and reading original pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Reading original sources</span><span>Ranking your matches</span></div></div> : results.length ? <section className="results">
             <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{results.length} opportunities to explore</h2><p>Sorted by how closely each source fits your search.</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
-            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {new Date(activity.researchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span><em>See queries +</em></summary><ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul></details>}
-            <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }}/>)}</div>
+            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {safeDateTime(activity.researchedAt)}</span><em>See queries +</em></summary>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {Number.isNaN(Date.parse(activity.freshnessStart)) ? "recently" : new Date(activity.freshnessStart).toLocaleDateString()} · thesis search remains broad.</p>}<ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}</details>}
+            {constraintExplanation && <div className="partial-warning">{constraintExplanation}</div>}
+            {closedResults.length > 0 && <button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show"} {closedResults.length} closed/expired results</button>}
+            <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>
+            {showClosed && <div className="result-list closed-results">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}
             <p className="disclaimer">ⓘ Opportunity availability can change. Always confirm status and requirements with the organization.</p>
           </section> : <section className="starter"><div className="section-head"><div><label>YOUR STARTING POINT</label><h2>A little context goes a long way.</h2></div><span>A more complete profile means closer matches.</span></div><div className="starter-grid"><button className="starter-card" onClick={() => setScreen("profile")}><i className="purple">♙</i><span><b>Build your profile</b><small>{profile.field || "Add your studies, skills and interests"}</small></span><strong>→</strong><div className="progress"><i style={{ width: [profile.field, profile.skills, profile.university, profile.interests].filter(Boolean).length * 25 + "%" }}/></div></button><button className="starter-card" onClick={() => setScreen("apps")}><i className="green">▱</i><span><b>Save your first opportunity</b><small>{apps.length ? apps.length + " saved in your workspace" : "Keep interesting roles in one place"}</small></span><strong>→</strong><div className="progress"><i style={{ width: apps.length ? "100%" : "0%" }}/></div></button></div><div className="privacy-message"><b>⌑ &nbsp; Your profile stays yours.</b><span>Personal details stay on this device. Only broad, non-identifying search criteria go to Exa.</span></div></section>}
         </>}
+        {screen === "discover" && hasSearched && !busy && !results.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>{closedResults.length > 0 && <><button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show"} {closedResults.length} closed/expired results</button>{showClosed && <div className="result-list">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}</>}</>}
       </div>
       <footer><b>✳ APPLYOS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
     </section>
-    {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)}/>}
+    {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} similar={similarById[selected.id]} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)} onSimilar={() => void findSimilar(selected)} onManualDocument={(document) => toggleManualDocument(selected.id, document)}/>}
     {message && <div className="toast">✓ &nbsp; {message}</div>}
     <input ref={inputRef} hidden type="file" accept=".pdf,application/pdf" onChange={upload}/>
   </main>;
@@ -175,24 +216,110 @@ function Field({ label, value, update, placeholder, wide }: { label: string; val
   return <label className={"field" + (wide ? " wide" : "")}><span>{label}</span><input value={value} onChange={(e) => update(e.target.value)} placeholder={placeholder}/></label>;
 }
 
-function OpportunityCard({ item, saved, index, onSave, onOpen }: { item: Opportunity; saved: boolean; index: number; onSave: () => void; onOpen: () => void }) {
+function SimilarPanel({ state }: { state?: { loading: boolean; results: SimilarOpportunity[]; error: string } }) {
+  if (!state) return null;
+  return <div className="similar-panel">
+    <div className="similar-heading"><b>Related organizations & labs</b><span>Found with Exa Find Similar</span></div>
+    {state.loading && <p className="similar-message">Searching Exa for related organizations…</p>}
+    {state.error && <p className="similar-error">{state.error}</p>}
+    {!state.loading && !state.error && !state.results.length && <p className="similar-message">No related sources were returned for this page.</p>}
+    {Boolean(state.results.length) && <div className="similar-results">{state.results.map((result) => <article key={result.url}>
+      <a href={result.url} target="_blank" rel="noreferrer">{result.title} <span>↗</span></a>
+      {result.highlights.length ? result.highlights.slice(0, 2).map((highlight, index) => <blockquote key={index}>“{highlight}”</blockquote>) : <p className="similar-excerpt">{result.text?.slice(0, 360) || "Exa returned this related source without a text highlight."}</p>}
+    </article>)}</div>}
+  </div>;
+}
+
+function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query: string; error: string; explanation?: string | null; onRetry: () => void; onBroader: (query: string) => void }) {
+  return <section className="empty-results">
+    <div className="empty-results-icon">{error ? "!" : "⌕"}</div>
+    <div className="empty-results-copy"><label>{error ? "SEARCH NEEDS ANOTHER TRY" : "NO MATCHES IN THIS SEARCH"}</label><h2>{error ? "We couldn’t complete that search." : "No student opportunities surfaced for this query."}</h2>
+      <p>{error || explanation || "Try a broader field, remove a location or date constraint, or search using a neighboring role title. APPLYOS only shows opportunities returned by live sources."}</p>
+      {!error && <div className="broader-tips"><span>Try:</span><button onClick={() => onBroader(query + " internship OR thesis")}>internships or thesis roles</button><button onClick={() => onBroader(query + " Finland OR Europe")}>a wider location</button><button onClick={() => onBroader("student research assistant " + query)}>student research roles</button></div>}
+      {error && <button className="primary" onClick={onRetry}>Retry search <span>→</span></button>}
+    </div>
+  </section>;
+}
+
+function OpportunityCard({ item, saved, index, similar, onSave, onOpen, onSimilar }: {
+  item: Opportunity;
+  saved: boolean;
+  index: number;
+  similar?: { loading: boolean; results: SimilarOpportunity[]; error: string };
+  onSave: () => void;
+  onOpen: () => void;
+  onSimilar: () => void;
+}) {
+  const isOpen = item.status === "Verified open" || item.status === "Possibly open";
+  const published = item.publishedDate && !Number.isNaN(Date.parse(item.publishedDate)) ? new Date(item.publishedDate).toLocaleDateString() : "Publication date unknown";
   return <article className="opportunity" style={{ animationDelay: index * 60 + "ms" }}>
     <div className="opportunity-head"><span className={"company-mark mark-" + (index % 4)}>{item.company.slice(0, 2).toUpperCase()}</span><div className="company-info"><div><b>{item.company}</b><span className="source-found">◉ Source found</span></div><h3>{item.title}<i>{item.type}</i></h3></div><button className={saved ? "bookmark saved" : "bookmark"} onClick={onSave} aria-label={saved ? "Remove saved opportunity" : "Save opportunity"}>{saved ? "♥" : "♡"}</button></div>
-    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.location}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : "Deadline not specified"}</span><span className={item.status === "Possibly open" ? "status open" : "status"}><i/>{item.status}</span></div>
+    <div className="opportunity-badges"><span className="role-badge">{item.type}</span><span className="published-badge">◷ Published · {published}</span></div>
+    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.locationLabel || item.location}{item.locationSnippet ? ` · “${item.locationSnippet}”` : ""}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : item.programCycle ? "Program cycle · " + item.programCycle : "Deadline not specified"}</span><span className={isOpen ? "status open" : "status"}><i/>{item.applicationStatus || item.status}</span></div>
     <div className="match"><span><i style={{ width: item.match + "%" }}/></span><b>{item.match}% match</b><em>· {item.matchReason}</em></div>
+    <details className="match-details"><summary>Why this match? <b>+</b></summary><div><span><b>Matched skills</b>{item.matchedSkills?.length ? item.matchedSkills.map((skill) => <i key={skill}>{skill}</i>) : <small>No specific skill overlap found</small>}</span><span><b>Location</b><small className={"location-" + (item.locationMatch || "unknown")}>{item.locationMatch || "unknown"}</small></span><span><b>Still to verify</b><small>{item.missingInfo?.length ? item.missingInfo.join(" · ") : "No key information flagged"}</small></span></div></details>
     <div className="quote"><span>“</span><p>{item.source.excerpt || "Source page found by Exa. Open this result to read the evidence and investigate requirements."}</p></div>
-    <div className="opportunity-bottom"><a href={item.source.url} rel="noreferrer" target="_blank">↗ &nbsp;View source <small>↗</small></a><button onClick={onOpen}>Research opportunity <b>→</b></button></div>
+    <div className="opportunity-bottom"><a href={item.source.url} rel="noreferrer" target="_blank">↗ &nbsp;View source <small>↗</small></a><button className="similar-trigger" onClick={onSimilar}>Find similar (Exa) <b>⌕</b></button><button onClick={onOpen}>Research opportunity <b>→</b></button></div>
+    <SimilarPanel state={similar}/>
   </article>;
 }
 
-function Drawer({ item, saved, researching, summary, error, onClose, onSave, onInvestigate, onChecklist }: { item: Opportunity; saved: boolean; researching: boolean; summary: string; error: string; onClose: () => void; onSave: () => void; onInvestigate: () => void; onChecklist: (id: string, status: ChecklistItem["status"]) => void }) {
+function Citation({ sourceUrl, evidenceExcerpt }: { sourceUrl: string | null; evidenceExcerpt: string | null }) {
+  if (!sourceUrl) return null;
+  return <div className="citation"><a href={sourceUrl} target="_blank" rel="noreferrer">Source ↗</a>{evidenceExcerpt && <blockquote>“{evidenceExcerpt}”</blockquote>}</div>;
+}
+
+function Drawer({ item, saved, researching, summary, error, similar, onClose, onSave, onInvestigate, onChecklist, onSimilar, onManualDocument }: {
+  item: Opportunity;
+  saved: boolean;
+  researching: boolean;
+  summary: string;
+  error: string;
+  similar?: { loading: boolean; results: SimilarOpportunity[]; error: string };
+  onClose: () => void;
+  onSave: () => void;
+  onInvestigate: () => void;
+  onChecklist: (id: string, status: ChecklistItem["status"]) => void;
+  onSimilar: () => void;
+  onManualDocument: (document: string) => void;
+}) {
   const items = item.checklist || checklistDefaults.map((x) => ({ ...x, id: item.id + "-" + x.id }));
   const ready = items.filter((x) => x.status === "Ready" || x.status === "Completed").length;
+  const investigation = item.investigation;
+  const manualDocuments = item.manualDocuments ?? [];
+  const sources = investigation?.sources ?? [];
   return <div className="drawer-layer"><button className="scrim" onClick={onClose} aria-label="Close workspace"/><aside className="drawer"><header><button onClick={onClose}>← &nbsp;Back to opportunities</button><button onClick={onClose}>×</button></header><div className="drawer-body">
-    <label>● &nbsp; APPLICATION WORKSPACE</label><div className="drawer-company"><span className="company-mark mark-2">{item.company.slice(0, 2).toUpperCase()}</span><b>{item.company}</b><i>{item.type}</i></div><h1>{item.title}</h1><div className="drawer-facts"><span>⌖ {item.location}</span><span className="status"><i/>{item.status}</span></div><p className="drawer-summary">{item.summary}</p>
-    <button className="primary investigate" onClick={onInvestigate} disabled={researching}>{researching ? "◌ Reading original source…" : "✳ &nbsp; Investigate application  →"}</button><button className="save-wide" onClick={onSave}>{saved ? "♥ Saved to applications" : "♡ Save opportunity"}</button>
-    <section className="drawer-section"><div className="drawer-section-head"><div><small>RESEARCH NOTES</small><h3>What we know so far</h3></div><span>Evidence-led</span></div><p className="research-note">{summary || "Investigate this opportunity to read the original page and look for requirements, deadlines and application instructions."}</p><div className="source-box"><b><i/> ORIGINAL SOURCE</b><p>{item.source.excerpt || "Open the source to see the published announcement."}</p><a href={item.source.url} target="_blank" rel="noreferrer">{item.source.title} ↗</a></div></section>
-    <section className="drawer-section"><div className="drawer-section-head"><div><small>YOUR READINESS</small><h3>Application checklist</h3></div><strong className="readiness">{ready}<small>/{items.length}</small></strong></div><div className="checklist">{items.map((x) => <label key={x.id}><span className={x.status === "Ready" || x.status === "Completed" ? "checked" : ""}>{x.status === "Ready" || x.status === "Completed" ? "✓" : ""}</span><b>{x.label}</b><select value={x.status} onChange={(e) => onChecklist(x.id, e.target.value as ChecklistItem["status"])}><option>Ready</option><option>Missing</option><option>Needs review</option><option>Needs confirmation</option><option>Completed</option></select></label>)}</div></section>
+    <label>● &nbsp; APPLICATION WORKSPACE</label><div className="drawer-company"><span className="company-mark mark-2">{item.company.slice(0, 2).toUpperCase()}</span><b>{item.company}</b><i>{item.type}</i></div><h1>{item.title}</h1><div className="drawer-facts"><span>⌖ {item.location}</span><span className={(item.status === "Verified open" || item.status === "Possibly open") ? "status open" : "status"}><i/>{investigation?.status ?? item.status}</span></div><p className="drawer-summary">{item.summary}</p>
+    <button className="primary investigate" onClick={onInvestigate} disabled={researching}>{researching ? "◌ Reading source pages…" : "✳ &nbsp; Investigate application  →"}</button><button className="save-wide" onClick={onSave}>{saved ? "♥ Saved to applications" : "♡ Save opportunity"}</button>
+    <button className="similar-workspace-trigger" onClick={onSimilar} disabled={similar?.loading}>{similar?.loading ? "◌ Searching related organizations…" : "⌕ &nbsp; Find similar (Exa)"}</button>
+    <SimilarPanel state={similar}/>
+
+    <section className="drawer-section"><div className="drawer-section-head"><div><small>RESEARCH NOTES</small><h3>Application details</h3></div><span>{investigation ? "Multi-source research" : "Evidence-led"}</span></div>
+      <p className="research-note">{investigation?.summary || summary || "Investigate this opportunity to read its original page and search the employer’s application instructions."}</p>
+      <div className="research-facts">
+        <Fact label="Deadline" value={investigation?.deadline || "Not verified"} sourceUrl={investigation?.deadlineEvidence?.sourceUrl ?? null} evidenceExcerpt={investigation?.deadlineEvidence?.evidenceExcerpt ?? null}/>
+        <Fact label="Application method" value={investigation?.applicationMethod?.type === "unknown" ? "Needs confirmation" : [investigation?.applicationMethod?.type, investigation?.applicationMethod?.details].filter(Boolean).join(" · ")} sourceUrl={investigation?.applicationMethod?.sourceUrl ?? null} evidenceExcerpt={investigation?.applicationMethod?.evidenceExcerpt ?? null}/>
+        <Fact label="Contact" value={investigation?.contactPerson ? [investigation.contactPerson.name, investigation.contactPerson.role].filter(Boolean).join(" · ") : "No public contact verified"} sourceUrl={investigation?.contactPerson?.sourceUrl ?? null} evidenceExcerpt={investigation?.contactPerson?.evidenceExcerpt ?? null}/>
+      </div>
+      {investigation?.failures?.length ? <div className="source-warning"><b>Some source checks were incomplete</b><ul>{investigation.failures.map((failure, index) => <li key={index}>{failure}</li>)}</ul>Available source evidence is still shown below.</div> : null}
+      {investigation?.applicationSteps?.length ? <div className="application-steps"><b>Application steps from sources</b><ol>{investigation.applicationSteps.map((step) => <li key={step.order}><span>{step.step}</span><Citation sourceUrl={step.sourceUrl} evidenceExcerpt={step.evidenceExcerpt}/></li>)}</ol></div> : null}
+      <div className="source-list"><b>Researched sources</b>{sources.length ? sources.map((source) => <div key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title} ↗</a>{source.publishedDate && <small>Published {new Date(source.publishedDate).toLocaleDateString()}</small>}</div>) : <div className="source-box"><p>{item.source.excerpt || "No source excerpt is available yet."}</p><a href={item.source.url} target="_blank" rel="noreferrer">{item.source.title} ↗</a></div>}</div>
+    </section>
+
+    <section className="drawer-section verified-section"><div className="drawer-section-head"><div><small>SOURCE-VERIFIED REQUIREMENTS</small><h3>What the sources ask for</h3></div><span>{investigation?.verifiedRequirements.length ?? 0} verified</span></div>
+      {investigation?.verifiedRequirements.length ? <div className="verified-requirements">{investigation.verifiedRequirements.map((requirement, index) => <article key={requirement.sourceUrl + index}><div className="requirement-title"><b>{requirement.requirement}</b><span className="requirement-ready">{requirement.readiness}</span></div>{requirement.documentType && <small>Document · {requirement.documentType}</small>}<Citation sourceUrl={requirement.sourceUrl} evidenceExcerpt={requirement.evidenceExcerpt}/></article>)}</div> : <p className="research-note">No requirement was verified from the returned source excerpts yet. Treat missing details as needs confirmation.</p>}
+      {investigation?.sourceChecklist.filter((entry) => entry.verification === "Needs confirmation").length ? <div className="confirmation-list"><b>Needs confirmation</b>{investigation.sourceChecklist.filter((entry) => entry.verification === "Needs confirmation").map((entry) => <p key={entry.id}>{entry.label}</p>)}</div> : null}
+    </section>
+
+    <section className="drawer-section manual-section"><div className="drawer-section-head"><div><small>MANUAL STUDENT STATUS</small><h3>Your document checklist</h3></div><span>Saved on this device</span></div><p className="manual-explainer">These are your own progress toggles. They are separate from source-verified requirements and do not submit documents.</p>
+      <div className="manual-documents">{manualDocumentOptions.map((document) => <label key={document}><input type="checkbox" checked={manualDocuments.includes(document)} onChange={() => onManualDocument(document)}/><span className="manual-check">{manualDocuments.includes(document) ? "✓" : ""}</span><b>{document}</b><small>{manualDocuments.includes(document) ? "Marked ready by you" : "Mark as ready"}</small></label>)}</div>
+    </section>
+
+    <section className="drawer-section"><div className="drawer-section-head"><div><small>APPLICATION PREPARATION</small><h3>Manual checklist status</h3></div><strong className="readiness">{ready}<small>/{items.length}</small></strong></div><div className="checklist">{items.map((x) => <label key={x.id}><span className={x.status === "Ready" || x.status === "Completed" ? "checked" : ""}>{x.status === "Ready" || x.status === "Completed" ? "✓" : ""}</span><b>{x.label}</b><select value={x.status} onChange={(e) => onChecklist(x.id, e.target.value as ChecklistItem["status"])}><option>Ready</option><option>Missing</option><option>Needs review</option><option>Needs confirmation</option><option>Completed</option></select></label>)}</div></section>
     <section className="drawer-section next-step"><small>A QUESTION TO CONFIRM</small><p>Is this opportunity still accepting applications, and which supporting documents are required?</p><span>Draft only · no message is sent by APPLYOS</span></section>{error && <div className="inline-error">{error}</div>}
   </div></aside></div>;
+}
+
+function Fact({ label, value, sourceUrl, evidenceExcerpt }: { label: string; value: string; sourceUrl: string | null; evidenceExcerpt: string | null }) {
+  return <div className="research-fact"><small>{label}</small><b>{value}</b><Citation sourceUrl={sourceUrl} evidenceExcerpt={evidenceExcerpt}/></div>;
 }
