@@ -1,5 +1,5 @@
-import ApplyOS from "@/components/ApplyOS";
+import PaveOS from "@/components/PaveOS";
 
 export default function Home() {
-  return <ApplyOS />;
+  return <PaveOS />;
 }

@@ -5,12 +5,6 @@ import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
 import { opportunityResultsHeadline } from "@/lib/matching";
 import type { ChecklistItem, InvestigationData, Opportunity, Profile, RelatedInformation, SimilarOpportunity } from "@/lib/types";
 
-const scenarios = [
-  ["Suomi · Tampere · tuotantotalous", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."],
-  ["AI + robotics · thesis", "I'm looking for a master's thesis in AI or robotics, ideally in Finland or Europe."],
-  ["Sustainability · business thesis", "I'm a business master's student interested in sustainability. Find thesis opportunities in Finland."],
-  ["Mechanical engineering · Europe", "I'm studying mechanical engineering and looking for an internship in Europe."]
-];
 const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", cvText: "", roleMode: "auto", availability: "" };
 const manualDocumentOptions = ["CV", "Academic Transcript / Opintosuoritusote", "Portfolio / GitHub", "Motivation Letter"];
 const checklistDefaults: ChecklistItem[] = [
@@ -28,7 +22,7 @@ function safeHttpsUrl(value?: string | null, fallback?: string | null): string |
   }
   return null;
 }
-export default function ApplyOS() {
+export default function PaveOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
   const [results, setResults] = useState<Opportunity[]>([]);
@@ -66,13 +60,12 @@ export default function ApplyOS() {
 
   const saved = useMemo(() => new Set(apps.map((x) => x.id)), [apps]);
 
-  async function search(value: string, roleModeOverride?: Profile["roleMode"]) {
+  async function search(value: string) {
     const q = value.trim();
     if (!q || busy) return;
     setQuery(q); setError(""); setConstraintExplanation(null); setBusy(true); setResults([]); setClosedResults([]); setUnverifiedResults([]); setRelatedInformation([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
     try {
-      const searchProfile = roleModeOverride ? { ...profile, roleMode: roleModeOverride } : profile;
-      const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile: searchProfile }) });
+      const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not search right now.");
       setResults(data.opportunities || []); setClosedResults(data.closedOpportunities || []); setUnverifiedResults(data.confirmationOpportunities || data.unverifiedOpportunities || []); setRelatedInformation(data.relatedInformation || []); setConstraintExplanation(data.constraintSummary || data.constraintExplanation || null); setActivity(data.activity || null);
@@ -175,7 +168,7 @@ export default function ApplyOS() {
   const firstName = profile.name.trim().split(/\s+/)[0] || "there";
   return <main className={"shell" + (hasSearched ? " searched" : "")}>
     <aside className={"sidebar" + (navOpen ? " shown" : "")}>
-      <div className="brand"><span className="brand-icon">✳</span><b>apply<span>os</span></b></div>
+      <div className="brand"><svg className="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M7 7h11v11H7zM22 7h11v11H22zM7 22h11v11H7zM22 22h11v11H22z"/><path d="M18 12h4M12 18v4m16-4v4m-10 6h4"/></svg><b>Pave.OS</b></div>
       <div className="nav-label">YOUR WORKSPACE</div>
       <nav>
         <button className={screen === "discover" ? "nav active" : "nav"} onClick={() => { setScreen("discover"); setNavOpen(false); }}><span>▦</span>Discover</button>
@@ -189,7 +182,7 @@ export default function ApplyOS() {
       <header className="topbar"><button className="mobile-menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button><div className="crumb">Workspace <span>/</span> <b>{screen === "discover" ? "Discover" : screen === "apps" ? "My applications" : "Student profile"}</b></div><div className="privacy-status"><i/> Your profile is private <button onClick={() => setScreen("profile")}>{firstName[0]?.toUpperCase()}</button></div></header>
       <div className="content">
         {screen === "profile" ? <section className="profile-view">
-          <div className="page-head"><div><label>YOUR PRIVATE PROFILE</label><h1>Student profile</h1><p>Build your profile once. APPLYOS uses it to personalize every search.</p></div><button className="primary" onClick={() => { setScreen("discover"); setMessage("Profile saved on this device"); }}>Save profile ✓</button></div>
+          <div className="page-head"><div><label>YOUR PRIVATE PROFILE</label><h1>Student profile</h1><p>Build your profile once. Pave.OS uses it to personalize every search.</p></div><button className="primary" onClick={() => { setScreen("discover"); setMessage("Profile saved on this device"); }}>Save profile ✓</button></div>
           <div className="profile-layout"><div>
             <section className="panel"><div className="panel-head"><span className="panel-symbol purple">♙</span><div><h3>About you</h3><p>Only broad search criteria leave your browser.</p></div></div><div className="fields">
               <Field label="Your name" value={profile.name} update={(v) => setProfile((p) => ({ ...p, name: v }))} placeholder="First and last name"/>
@@ -219,16 +212,15 @@ export default function ApplyOS() {
         </section> : <>
           <div className="welcome"><div><label>● &nbsp; YOUR OPPORTUNITY DESK</label><h1>Good morning, {firstName}<span>✳</span></h1><p>One profile. Every opportunity. <b>Zero research.</b></p></div><span className="welcome-note">✦ &nbsp; Your next move, made clearer</span></div>
           <section className="hero"><div className="hero-icon">✳</div><h2>What are you looking for?</h2><p>Tell us what’s next. We’ll find the opportunities and the details that matter.</p>
-            <div className="scenario-row"><span>TRY AN EXAMPLE QUERY</span>{scenarios.map((scenario, i) => <button key={scenario[0]} className={"scenario scenario-" + i} disabled={busy} onClick={() => { const roleMode = /thesis|diplomityö|gradu/i.test(scenario[1]) ? "thesis" : "internship"; setProfile((current) => ({ ...current, roleMode })); setQuery(scenario[1]); void search(scenario[1], roleMode); }}><i>{["あ", "✳", "◉", "⌁"][i]}</i>Try Example Query · {scenario[0]} <b>↗</b></button>)}</div>
             <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Or describe your own opportunity search..." aria-label="Describe your opportunity search"/><select aria-label="Filter by opportunity type" value={profile.roleMode ?? "auto"} onChange={(e) => setProfile((p) => ({ ...p, roleMode: e.target.value as Profile["roleMode"] }))}><option value="auto">Infer type</option><option value="internship">Internships only</option><option value="thesis">Thesis roles only</option><option value="both">Both types</option></select><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
           </section>
           {error && <div className="error-banner"><b>Research paused</b><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
-          {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking live sources and verifying promising pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Verifying original pages</span><span>Ranking confirmed matches</span></div></div> : results.length || closedResults.length || unverifiedResults.length || relatedInformation.length || error || activity ? <section className="results">
+          {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>Pave.OS is checking live sources and verifying promising pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Verifying original pages</span><span>Ranking confirmed matches</span></div></div> : results.length || closedResults.length || unverifiedResults.length || relatedInformation.length || error || activity ? <section className="results">
             <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{error ? "Search could not be completed" : opportunityResultsHeadline(results.length, unverifiedResults.length, closedResults.length)}</h2><p>{error ? "Retry the live search to check current sources." : results.length > 0 ? "These opportunities passed source, status, profile and query checks." : unverifiedResults.length > 0 ? "Review the specific roles below and confirm the current intake window on the official host." : closedResults.length > 0 ? "Closed and expired listings are available below for reference." : "No specific student role matched this search."}</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
             {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Reviewed {activity.sources} Exa results and retrieved content for {activity.contentsReviewed ?? 0} promising pages · {formatSafeTimestamp(activity.researchedAt)}</span><em>See what we found +</em></summary><p className="freshness-note">{activity.opportunityPages ?? 0} official opportunities · {activity.secondaryPages ?? 0} secondary listings to confirm · {activity.guidancePages ?? 0} guidance · {activity.profilePages ?? 0} profiles · {activity.archivedPages ?? 0} archives · {activity.overviewPages ?? 0} organization pages · {activity.irrelevantPages ?? 0} unrelated · {activity.unverifiablePages ?? 0} could not be verified.</p>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {formatSafeTimestamp(activity.freshnessStart)} · thesis search remains broad.</p>}<SourceAuditList sources={activity.sourceAudit ?? []}/><ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}{activity.failedContents?.length ? <div className="partial-warning"><b>Some promising pages could not be verified.</b>{activity.failedContents.map((item, index) => <p key={index}>{item}</p>)}</div> : null}</details>}
             {constraintExplanation && <div className="partial-warning">{constraintExplanation}</div>}
             <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div>
-            {!results.length && !unverifiedResults.length && !closedResults.length && <EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>}
+            {!results.length && !unverifiedResults.length && !closedResults.length && <EmptyResults error={error} explanation={constraintExplanation} onRetry={() => void search(query)}/>}
             {unverifiedResults.length > 0 && <section className="separated-results"><h3>Specific roles to confirm ({unverifiedResults.length})</h3><p>These roles appear relevant but came from a secondary source or need an intake-window check. The cards explain what to confirm.</p><div className="result-list">{unverifiedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div></section>}
             {closedResults.length > 0 && <details className="separated-results closed-results"><summary>Show {closedResults.length} closed opportunities</summary><p>These were specific roles, but their sources say they are closed or their deadline has passed.</p><div className="result-list">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div></details>}
             {relatedInformation.length > 0 && <RelatedInformationPanel items={relatedInformation}/>}
@@ -236,9 +228,9 @@ export default function ApplyOS() {
             <p className="disclaimer">ⓘ Opportunity availability can change. Always confirm status and requirements with the organization.</p>
           </section> : <section className="starter"><div className="section-head"><div><label>YOUR STARTING POINT</label><h2>A little context goes a long way.</h2></div><span>A more complete profile means closer matches.</span></div><div className="starter-grid"><button className="starter-card" onClick={() => setScreen("profile")}><i className="purple">♙</i><span><b>Build your profile</b><small>{profile.field || "Add your studies, skills and interests"}</small></span><strong>→</strong><div className="progress"><i style={{ width: [profile.field, profile.skills, profile.university, profile.interests].filter(Boolean).length * 25 + "%" }}/></div></button><button className="starter-card" onClick={() => setScreen("apps")}><i className="green">▱</i><span><b>Save your first opportunity</b><small>{apps.length ? apps.length + " saved in your workspace" : "Keep interesting roles in one place"}</small></span><strong>→</strong><div className="progress"><i style={{ width: apps.length ? "100%" : "0%" }}/></div></button></div><div className="privacy-message"><b>⌑ &nbsp; Your profile stays yours.</b><span>Personal details stay on this device. Only broad, non-identifying search criteria go to Exa.</span></div></section>}
         </>}
-        {screen === "discover" && hasSearched && !busy && !activity && !error && !results.length && !closedResults.length && !unverifiedResults.length && !relatedInformation.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/></>}
+        {screen === "discover" && hasSearched && !busy && !activity && !error && !results.length && !closedResults.length && !unverifiedResults.length && !relatedInformation.length && <><EmptyResults error={error} explanation={constraintExplanation} onRetry={() => void search(query)}/></>}
       </div>
-      <footer><b>✳ APPLYOS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
+      <footer><b>Pave.OS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
     </section>
     {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} similar={similarById[selected.id]} draftMessage={draftMessage} onDraftChange={updateDraft} onDraftReset={resetDraft} onDraftCopy={() => void copyDraft()} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)} onSimilar={() => void findSimilar(selected)} onManualDocument={(document) => toggleManualDocument(selected.id, document)}/>}
     {message && <div className="toast">✓ &nbsp; {message}</div>}
@@ -272,12 +264,11 @@ function SourceAuditList({ sources }: { sources: Array<{ title: string; url: str
   return <details className="source-audit"><summary>Review each source ({sources.length})</summary><ul>{sources.map((source, index) => <li key={`${source.url}-${index}`}><b>{source.category.replaceAll("-", " ")}{source.sourceQuality ? ` · ${source.sourceQuality} source` : ""}</b><span>{source.title}</span><p>{source.reason}</p>{source.evidenceExcerpt && <blockquote>“{source.evidenceExcerpt}”</blockquote>}{safeHttpsUrl(source.url) && <a href={safeHttpsUrl(source.url) ?? undefined} target="_blank" rel="noopener noreferrer">Source ↗</a>}</li>)}</ul></details>;
 }
 
-function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query: string; error: string; explanation?: string | null; onRetry: () => void; onBroader: (query: string) => void }) {
+function EmptyResults({ error, explanation, onRetry }: { error: string; explanation?: string | null; onRetry: () => void }) {
   return <section className="empty-results">
     <div className="empty-results-icon">{error ? "!" : "⌕"}</div>
     <div className="empty-results-copy"><label>{error ? "SEARCH NEEDS ANOTHER TRY" : "NO MATCHES IN THIS SEARCH"}</label><h2>{error ? "We couldn’t complete that search." : "No matching student opportunities found."}</h2>
-      <p>{error || explanation || "Try a broader field, remove a location or date constraint, or search using a neighboring role title. APPLYOS only shows opportunities returned by live sources."}</p>
-      {!error && <div className="broader-tips"><span>Try:</span><button onClick={() => onBroader(query + " internship OR thesis")}>internships or thesis roles</button><button onClick={() => onBroader(query + " Finland OR Europe")}>a wider location</button><button onClick={() => onBroader("student research assistant " + query)}>student research roles</button></div>}
+      <p>{error || explanation || "Try broadening your search terms, relaxing a location constraint, or searching a related role title. Pave.OS only shows opportunities returned by live sources."}</p>
       {error && <button className="primary" onClick={onRetry}>Retry search <span>→</span></button>}
     </div>
   </section>;
@@ -370,7 +361,7 @@ function Drawer({ item, saved, researching, summary, error, similar, draftMessag
     </section>
 
     <section className="drawer-section draft-section"><div className="drawer-section-head"><div><small>PRE-APPLICATION / OUTREACH MESSAGE</small><h3>Draft for your review</h3></div><span>Never sent automatically</span></div>
-      {investigation ? <><p className="manual-explainer">Review and edit this profile-based draft before using it. No message is sent by APPLYOS.</p><textarea className="outreach-draft" value={draftMessage} onChange={(event) => onDraftChange(event.target.value)} aria-label="Editable pre-application message draft"/><div className="draft-actions"><button onClick={onDraftCopy}>Copy Message</button><button onClick={onDraftReset}>Reset Draft</button></div></> : <p className="research-note">Investigate this opportunity to prepare a draft grounded in your profile and verified source facts.</p>}
+      {investigation ? <><p className="manual-explainer">Review and edit this profile-based draft before using it. No message is sent by Pave.OS.</p><textarea className="outreach-draft" value={draftMessage} onChange={(event) => onDraftChange(event.target.value)} aria-label="Editable pre-application message draft"/><div className="draft-actions"><button onClick={onDraftCopy}>Copy Message</button><button onClick={onDraftReset}>Reset Draft</button></div></> : <p className="research-note">Investigate this opportunity to prepare a draft grounded in your profile and verified source facts.</p>}
     </section>
 
     <section className="drawer-section verified-section"><div className="drawer-section-head"><div><small>SOURCE-VERIFIED REQUIREMENTS</small><h3>What the sources ask for</h3></div><span>{investigation?.verifiedRequirements.length ?? 0} verified</span></div>
@@ -383,7 +374,7 @@ function Drawer({ item, saved, researching, summary, error, similar, draftMessag
     </section>
 
     <section className="drawer-section"><div className="drawer-section-head"><div><small>APPLICATION PREPARATION</small><h3>Manual checklist status</h3></div><strong className="readiness">{ready}<small>/{items.length}</small></strong></div><div className="checklist">{items.map((x) => <label key={x.id}><span className={x.status === "Ready" || x.status === "Completed" ? "checked" : ""}>{x.status === "Ready" || x.status === "Completed" ? "✓" : ""}</span><b>{x.label}</b><select value={x.status} onChange={(e) => onChecklist(x.id, e.target.value as ChecklistItem["status"])}><option>Ready</option><option>Missing</option><option>Needs review</option><option>Needs confirmation</option><option>Completed</option></select></label>)}</div></section>
-    <section className="drawer-section next-step"><small>A QUESTION TO CONFIRM</small><p>Is this opportunity still accepting applications, and which supporting documents are required?</p><span>Draft only · no message is sent by APPLYOS</span></section>{error && <div className="inline-error">{error}</div>}
+    <section className="drawer-section next-step"><small>A QUESTION TO CONFIRM</small><p>Is this opportunity still accepting applications, and which supporting documents are required?</p><span>Draft only · no message is sent by Pave.OS</span></section>{error && <div className="inline-error">{error}</div>}
   </div></aside></div>;
 }
 

@@ -4,8 +4,8 @@ import "./mobile.css";
 import "./opportunity-details.css";
 
 export const metadata: Metadata = {
-  title: "APPLYOS — Your next opportunity starts here",
-  description: "One profile. Every opportunity. Zero research.",
+  title: "Pave.OS — Your next opportunity starts here",
+  description: "Pave.OS helps students discover and prepare for real opportunities.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

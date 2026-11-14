@@ -1,8 +1,8 @@
-# APPLYOS
+# Pave.OS
 
 **One profile. Every opportunity. Zero research.**
 
-APPLYOS is a student opportunity research MVP. Students describe the work they want, search live public web pages with Exa, inspect source evidence, and investigate application requirements from an opportunity workspace.
+Pave.OS helps students find and prepare for internships, thesis projects, and early-career opportunities. Students describe the work they want, search live public web pages with Exa, inspect source evidence, and investigate application requirements from an opportunity workspace.
 
 ## Run locally
 
@@ -18,7 +18,7 @@ For live searches, EXA_API_KEY is required. When configured, OPENAI_API_KEY enab
 
 Deploy to Vercel with the Next.js preset. Add EXA_API_KEY and optionally OPENAI_API_KEY to the Vercel project’s server environment variables. The application stores student profile fields, parsed CV text, saved applications, and checklist state in the visitor’s browser localStorage; it does not require a database.
 
-The API key must be configured in Vercel for live research. API routes return an explicit error when the Exa key is missing; APPLYOS does not invent opportunities.
+The API key must be configured in Vercel for live research. API routes return an explicit error when the Exa key is missing; Pave.OS does not invent opportunities.
 
 ## Privacy and data flow
 
@@ -41,7 +41,7 @@ The app labels availability conservatively. A result is Unknown unless the sourc
 ## Project structure
 
 - app/ — Next.js App Router UI and serverless API handlers
-- components/ApplyOS.tsx — client-side search, profile, saved applications, and opportunity workspace
+- components/PaveOS.tsx — client-side search, profile, saved applications, and opportunity workspace
 - lib/exa.ts — server-only Exa REST helper and shared content options
 - lib/matching.ts — deterministic relevance scoring and student-role filtering
 
