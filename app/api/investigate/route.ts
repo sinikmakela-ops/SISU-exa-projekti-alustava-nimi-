@@ -218,8 +218,13 @@ async function extractWithOpenAI(pages: ResearchPage[], title: string, skills: s
 }
 
 function canonicalPage(page: ExaPage, fallbackUrl?: string): ResearchPage | null {
-  const url = page.url || fallbackUrl;
-  if (!url) return null;
+  const rawUrl = page.url || fallbackUrl;
+  if (!rawUrl) return null;
+  let parsed: URL;
+  try { parsed = new URL(rawUrl); } catch { return null; }
+  if (!/^https?:$/.test(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) return null;
+  parsed.protocol = "https:";
+  const url = parsed.toString();
   const excerpt = [page.text, ...(page.highlights ?? []), page.summary]
     .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
     .join("\n");
@@ -236,7 +241,8 @@ export async function POST(request: Request) {
     if (!url) return NextResponse.json({ error: "Select an opportunity with a source first." }, { status: 400 });
     let parsedUrl: URL;
     try { parsedUrl = new URL(url); } catch { return NextResponse.json({ error: "The source URL is invalid." }, { status: 400 }); }
-    if (!/^https?:$/.test(parsedUrl.protocol)) return NextResponse.json({ error: "Only public web pages can be researched." }, { status: 400 });
+    if (!/^https?:$/.test(parsedUrl.protocol) || !parsedUrl.hostname || parsedUrl.username || parsedUrl.password) return NextResponse.json({ error: "Only public web pages can be researched." }, { status: 400 });
+    parsedUrl.protocol = "https:";
 
     const research = await investigateOpportunitySources(parsedUrl.toString());
     const pages = [

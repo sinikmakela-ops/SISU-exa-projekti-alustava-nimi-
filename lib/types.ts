@@ -38,6 +38,7 @@ export type Opportunity = {
   locationLabel?: string;
   locationSnippet?: string | null;
   matchedTopics?: string[];
+  scoreBreakdown?: { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
   eligibilityStatus?: string;
   applicationStatus?: "Verified open" | "Possibly open" | "Unknown" | "Closed";
   closedEvidence?: string | null;

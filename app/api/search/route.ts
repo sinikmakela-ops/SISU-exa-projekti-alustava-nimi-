@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
-import { classifyOpportunity, explainOpportunityMatch, extractDeadlineEvidence, extractLocationInfo, extractProgramCycle, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunity, explainOpportunityMatch, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -99,7 +99,7 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
     title: titleParts[0] || title,
     type: classification.type,
     summary: String(raw.summary ?? sourceText.slice(0, 250)),
-    deadline: extractDeadlineEvidence(excerpt, now.toISOString().slice(0, 10))?.normalizedDate ?? extractDeadline(sourceText),
+    deadline: parseOpportunityDeadline(excerpt, raw.highlights ?? [], now.toISOString().slice(0, 10))?.normalizedDate ?? extractDeadline(sourceText),
     status: determineStatus(sourceText, raw.publishedDate, now),
     location: extractLocationInfo(title + " " + excerpt, url).label,
     source,
@@ -201,22 +201,24 @@ export async function POST(request: Request) {
     const constraints = parseSearchConstraints(query, body.profile ?? {});
     const constrained = normalized.map((item) => {
       const fullText = `${item.title} ${item.summary} ${item.source.excerpt}`;
-      const deadline = extractDeadlineEvidence(fullText, now.toISOString().slice(0, 10));
+      const deadline = parseOpportunityDeadline(fullText, [], now.toISOString().slice(0, 10));
       const cycle = extractProgramCycle(fullText, now.toISOString().slice(0, 10));
+      const deadlineValue = deadline?.normalizedDate ?? item.deadline;
+      const deadlinePast = deadline?.isPast ?? Boolean(item.deadline && item.deadline < now.toISOString().slice(0, 10));
       const locationInfo = extractLocationInfo(`${item.title} ${fullText}`, item.source.url);
-      const placeMatch = locationConstraintMatch(locationInfo, constraints);
-      const degreeConflict = constraints.excludeDegree && /bachelor'?s degree required|master'?s degree required|completed degree|required[^.]{0,40}degree/i.test(fullText);
+      const placeMatch = locationConstraintMatch(locationInfo, constraints, `${fullText} ${item.source.url}`);
+      const degreeConflict = constraints.excludeDegree && /(?:bachelor'?s|master'?s|completed)?\s*degree(?:\s+in\s+[^.;,]{2,60})?\s+(?:is\s+)?required|completed degree|must have (?:a )?(?:bachelor'?s|master'?s) degree|degree required/i.test(fullText);
       const travelConflict = constraints.excludeTravel && /travel required|must be willing to travel/i.test(fullText);
       const mismatch = placeMatch === "mismatch" ? [`Requested location (${constraints.locations.join(", ")}) is not supported by this source`] : [];
       const conflict = degreeConflict || travelConflict;
-      const closed = Boolean(deadline?.isPast || cycle?.isPast || item.status === "Closed");
-      return { ...item, deadline: deadline?.normalizedDate ?? item.deadline, status: closed ? "Closed" as const : item.status, applicationStatus: closed ? "Closed" as const : item.status, closedEvidence: deadline?.isPast ? `${deadline.value} — ${deadline.evidenceExcerpt}` : cycle?.isPast ? cycle.value : null, programCycle: cycle?.value ?? null, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
+      const closed = Boolean(deadlinePast || cycle?.isPast || item.status === "Closed");
+      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, applicationStatus: closed ? "Closed" as const : item.status, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : null, programCycle: cycle?.value ?? null, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
     });
-    const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${item.source.excerpt}`, item.source.url), constraints) !== "mismatch" && !item._constraintConflict);
+    const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${item.source.excerpt}`, item.source.url), constraints, `${item.title} ${item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
-      return { ...item, match: match.score, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
+      return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
     }).sort((a, b) => b.match - a.match);
     const closedResults = ranked.filter((item) => item.applicationStatus === "Closed");
     const active = ranked.filter((item) => item.applicationStatus !== "Closed");
@@ -224,6 +226,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       opportunities: active.slice(0, 12),
       closedResults: closedResults.slice(0, 12),
+      constraintSummary: eligible.length === 0 && (constraints.locations.length > 0 || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
       constraintExplanation: !active.length && constraints.locations.length ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
