@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
-import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, isAllowedRoleMode, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -10,16 +10,18 @@ type SearchPlan = { query: string; startPublishedDate?: string };
 function queriesFor(query: string, profile: Partial<Profile>, now = new Date()): SearchPlan[] {
   const focus = [profile.field, profile.skills, profile.interests].filter(Boolean).join(" ").slice(0, 180);
   const base = (query + " " + focus).trim();
-  const mode = profile.roleMode ?? "internship";
+  const mode = inferOpportunityRoleMode(query, profile.roleMode);
   const internshipQuery = base + " (internship OR traineeship OR harjoittelu OR harjoittelupaikka) student opportunity";
   const thesisQuery = base + " (master's thesis OR bachelor's thesis OR diplomityö OR gradutoimeksianto OR thesis worker) university company";
   if (mode === "internship") return [
     { query: internshipQuery, startPublishedDate: publishedWithinDays(90, now) },
-    { query: base + " (internship OR trainee OR research assistant) student role", startPublishedDate: publishedWithinDays(90, now) },
+    { query: base + " (internship OR trainee OR research assistant) student role" },
+    { query: base + " (summer student OR kesätyö OR harjoittelu) university company" },
   ];
   if (mode === "thesis") return [
     { query: thesisQuery, startPublishedDate: publishedWithinDays(90, now) },
-    { query: base + " thesis position master's bachelor's diplomityö gradu", startPublishedDate: publishedWithinDays(90, now) },
+    { query: base + " thesis position master's bachelor's diplomityö gradu" },
+    { query: base + " research topic company university thesis project" },
   ];
   return [
     {
@@ -28,7 +30,9 @@ function queriesFor(query: string, profile: Partial<Profile>, now = new Date()):
     },
     {
       query: thesisQuery + " OR research assistant",
+      startPublishedDate: publishedWithinDays(90, now),
     },
+    { query: base + " (summer student OR kesätyö OR harjoittelu OR thesis project OR gradutoimeksianto)" },
   ];
 }
 
@@ -152,7 +156,7 @@ export async function POST(request: Request) {
     const settled = await Promise.allSettled(plan.map((item) => exaRequest<{ results?: ExaPage[] }>("/search", {
       query: item.query,
       type: "auto",
-      numResults: 8,
+      numResults: 12,
       ...(item.startPublishedDate ? { startPublishedDate: item.startPublishedDate } : {}),
       contents: CONTENT_OPTIONS,
     })));
@@ -163,17 +167,19 @@ export async function POST(request: Request) {
       throw new Error(messages.length ? messages.join(" ") : "Exa returned no successful search responses.");
     }
 
-    const seen = new Set<string>();
-    const normalized = successful.flatMap((run) => run.results)
-      .filter((item) => {
-        const key = String(item.url ?? "").replace(/\/$/, "").toLowerCase();
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
+    const merged = new Map<string, ExaPage>();
+    for (const run of successful) for (const page of run.results) {
+      const key = String(page.url ?? "").replace(/\/$/, "").toLowerCase();
+      if (!key) continue;
+      const prior = merged.get(key);
+      if (!prior) merged.set(key, page);
+      else merged.set(key, { ...prior, ...page, text: [prior.text, page.text].filter(Boolean).join("\n"), highlights: [...new Set([...(prior.highlights ?? []), ...(page.highlights ?? [])])], summary: prior.summary || page.summary });
+    }
+    const rawPages = [...merged.values()];
+    const normalized = rawPages
       .map((item) => normalize(item, query, body.profile ?? {}, now))
       .filter((item): item is Opportunity => item !== null)
-      .filter((item) => isAllowedRoleMode(item.title, item.source.excerpt, body.profile?.roleMode ?? "internship"));
+      .filter((item) => isAllowedRoleMode(item.title, item.source.excerpt, inferOpportunityRoleMode(query, body.profile?.roleMode)));
     const sourceDomains = [...new Set(normalized.flatMap((item) => { try { return [new URL(item.source.url).hostname.replace(/^www\./, "")]; } catch { return []; } }))];
 
     const constraints = parseSearchConstraints(query, body.profile ?? {});
@@ -215,15 +221,21 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({
-      opportunities: active.slice(0, 12),
+      opportunities: active,
       constraintSummary: eligible.length === 0 && (constraints.locations.length > 0 || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
       constraintExplanation: !active.length && constraints.locations.length && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
         freshnessStart: plan.find((item) => item.startPublishedDate)?.startPublishedDate ?? null,
-        sources: seen.size,
+        sources: rawPages.length,
+        fetched: rawPages.length,
+        studentRoles: normalized.length,
+        constraintMatches: eligible.length,
+        excludedByConstraints: constrained.length - eligible.length,
+        closedExcluded: filteredOutExpired,
+        duplicatesMerged: successful.reduce((total, run) => total + run.results.length, 0) - rawPages.length,
         sourceDomains,
-        roleMode: body.profile?.roleMode ?? "internship",
+        roleMode: inferOpportunityRoleMode(query, body.profile?.roleMode),
         returned: active.length,
         filteredOutExpired,
         researchedAt: now.toISOString(),

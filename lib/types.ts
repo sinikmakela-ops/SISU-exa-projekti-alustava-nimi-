@@ -2,7 +2,7 @@ export type Profile = {
   name: string; degree: string; field: string; university: string; level: string;
   graduation: string; skills: string; interests: string; locations: string;
   preference: string; languages: string; experience: string; cvText: string;
-  roleMode?: "internship" | "thesis" | "both";
+  roleMode?: "auto" | "internship" | "thesis" | "both";
   availability?: string;
 };
 

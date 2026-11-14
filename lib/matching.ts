@@ -6,6 +6,16 @@ export type DeadlineEvidence = { value: string; normalizedDate: string | null; p
 export type MatchScoreBreakdown = { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
 export type OpportunityRoleMode = "internship" | "thesis" | "both";
 
+export function inferOpportunityRoleMode(query: string, explicitMode?: OpportunityRoleMode | "auto"): OpportunityRoleMode {
+  if (explicitMode && explicitMode !== "auto") return explicitMode;
+  const thesis = /\b(thesis|diplomity[oö]|gradu|opinn[aä]ytety[oö]|thesis worker)\b/i.test(query);
+  const internship = /\b(internship|intern|trainee|harjoittel\w*)\b/i.test(query);
+  if (thesis && internship) return "both";
+  if (thesis) return "thesis";
+  if (internship) return "internship";
+  return "both";
+}
+
 const places: Record<string, string[]> = { Gothenburg: ["gothenburg", "göteborg"], Nairobi: ["nairobi"], Stockholm: ["stockholm"], Tampere: ["tampere"], Helsinki: ["helsinki"], Espoo: ["espoo"], Oulu: ["oulu"], Turku: ["turku"], Jyväskylä: ["jyväskylä", "jyvaskyla"], Vaasa: ["vaasa"], Lappeenranta: ["lappeenranta"], Kuopio: ["kuopio"], Toronto: ["toronto"], Vancouver: ["vancouver"], Finland: ["finland", "suomi"], Canada: ["canada"], Sweden: ["sweden", "swedish", "ruotsi", "svenska"], Germany: ["germany", "deutschland"], Europe: ["europe", "eurooppa"], Remote: ["remote", "remotely", "etätyö"], Mars: ["mars"], Moon: ["moon", "lunar"], "Space station": ["space station", "iss"], Atlantis: ["atlantis"] };
 const today = () => new Date().toISOString().slice(0, 10);
 const normalize = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
@@ -35,9 +45,9 @@ export function locationConstraintMatch(info: LocationInfo, constraints: SearchC
   if (!constraints.locations.length) return "unknown";
   const evidence = normalize(info.snippet ?? "");
   for (const requested of constraints.locations) { const aliases = places[requested] ?? [normalize(requested)]; if (aliases.some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(evidence))) return "match"; }
+  const allEvidence = normalize(evidenceText);
+  if (constraints.locations.some((requested) => (places[requested] ?? [normalize(requested)]).some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(allEvidence)))) return "match";
   if (!info.canonical) {
-    const allEvidence = normalize(evidenceText);
-    if (constraints.locations.some((requested) => (places[requested] ?? [normalize(requested)]).some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(allEvidence)))) return "match";
     return "mismatch";
   }
   if (constraints.locations.includes(info.canonical)) return "match";
