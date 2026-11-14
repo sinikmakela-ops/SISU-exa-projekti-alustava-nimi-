@@ -178,7 +178,7 @@ export async function POST(request: Request) {
     const rawPages = [...merged.values()];
     const looksPromising = (page: ExaPage) => /\b(intern(ship)?|trainee(ship)?|summer student|student|research assistant|thesis|diplomity[oö]|gradutoimeksianto|harjoittel\w*|kesäty\w*|junior|entry[- ]level|fellowship|scholarship|careers|how to apply)\b/i.test(`${page.title ?? ""} ${page.url ?? ""} ${page.text ?? ""} ${(page.highlights ?? []).join(" ")}`)
       && !/linkedin\.com\/in\/|\/people\/|\/staff\/|\/profile\//i.test(`${page.url ?? ""} ${page.title ?? ""}`);
-    const contentCandidates = rawPages.filter(looksPromising).slice(0, 18);
+    const contentCandidates = rawPages.filter(looksPromising).slice(0, 30);
     const contentFailures: string[] = [];
     const contentByUrl = new Map<string, ExaPage>();
     if (contentCandidates.length) {
@@ -274,7 +274,7 @@ export async function POST(request: Request) {
       const applicationStatus = closed ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadline?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : item.applicationStatus ?? item.status;
       return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, availabilityStatus: closed ? "Closed" as const : item.availabilityStatus, qualificationStatus: closed ? undefined : item.qualificationStatus, applicationNote: closed ? undefined : item.applicationNote, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
     });
-    const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`, item.source.url), constraints, `${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
+    const eligible = constrained.filter((item) => (!constraints.locationIsHard || locationConstraintMatch(extractLocationInfo(`${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`, item.source.url), constraints, `${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt} ${item.source.url}`) !== "mismatch") && !item._constraintConflict);
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
@@ -303,8 +303,8 @@ export async function POST(request: Request) {
       closedOpportunities: closedResults,
       unverifiedOpportunities,
       relatedInformation,
-      constraintSummary: eligible.length === 0 && (constraints.locations.length > 0 || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
-      constraintExplanation: !active.length && constraints.locations.length && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
+      constraintSummary: eligible.length === 0 && (constraints.locationIsHard || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => constraints.locationIsHard && locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
+      constraintExplanation: !active.length && constraints.locationIsHard && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
         sourceAudit,

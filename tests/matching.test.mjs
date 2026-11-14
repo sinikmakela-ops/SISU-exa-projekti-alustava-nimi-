@@ -29,7 +29,11 @@ test("hard location requests reject unrelated Earth sources and impossible locat
   const canada = parseSearchConstraints("internship in Canada");
   assert.equal(locationConstraintMatch(extractLocationInfo("Toronto, Canada internship", "https://example.ca/job"), canada), "match");
   const finland = parseSearchConstraints("internship in Finland");
+  assert.equal(finland.locationIsHard, true);
   assert.equal(locationConstraintMatch(extractLocationInfo("Head office: Sweden. Role available in Finland.", "https://example.se/job"), finland, "Head office: Sweden. Role available in Finland."), "match");
+  const profilePreference = parseSearchConstraints("engineering internship", { locations: "Finland" });
+  assert.deepEqual(profilePreference.locations, ["Finland"]);
+  assert.equal(profilePreference.locationIsHard, false);
 });
 
 test("negative eligibility constraints are parsed and degree conflicts reduce scores", () => {

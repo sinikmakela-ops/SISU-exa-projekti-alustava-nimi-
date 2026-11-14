@@ -1,6 +1,6 @@
 import type { Opportunity, Profile } from "@/lib/types";
 
-export type SearchConstraints = { locations: string[]; excludeDegree: boolean; excludeTravel: boolean; excludeSenior: boolean };
+export type SearchConstraints = { locations: string[]; locationIsHard: boolean; excludeDegree: boolean; excludeTravel: boolean; excludeSenior: boolean };
 export type LocationInfo = { canonical: string | null; certainty: "verified" | "inferred" | "unknown"; snippet: string | null; label: string };
 export type DeadlineEvidence = { value: string; normalizedDate: string | null; precision: "day" | "month" | "range" | "cycle"; evidenceExcerpt: string; isPast: boolean };
 export type MatchScoreBreakdown = { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
@@ -36,7 +36,7 @@ export function parseSearchConstraints(query: string, profile: Partial<Profile> 
   if (!locations.length && normalizedPlace) locations.push(normalizedPlace[0]);
   const genericPlacePhrase = new Set(["ai", "robotics", "engineering", "business", "thesis", "internship", "internships", "opportunities", "opportunity", "sustainability", "mechanical", "computer science", "data science", "research", "students"]);
   if (!locations.length && explicitPlace && explicitPlace.length <= 32 && explicitPlace.split(/\s+/).length <= 3 && !genericPlacePhrase.has(explicitPlace)) locations.push(explicitPlace.replace(/\b\w/g, (letter) => letter.toUpperCase()));
-  return { locations, excludeDegree: /\b(?:no|without|excluding|not requiring)\b[^.!?]{0,50}\bdegree\b/.test(q) || /\bdegree\s+not\s+required\b/.test(q), excludeTravel: /\b(no|without|excluding)\s+travel\b/.test(q), excludeSenior: /\b(not|no|without)\s+senior\b/.test(q) };
+  return { locations, locationIsHard: found.length > 0 || Boolean(normalizedPlace) || Boolean(explicitPlace && locations.length), excludeDegree: /\b(?:no|without|excluding|not requiring)\b[^.!?]{0,50}\bdegree\b/.test(q) || /\bdegree\s+not\s+required\b/.test(q), excludeTravel: /\b(no|without|excluding)\s+travel\b/.test(q), excludeSenior: /\b(not|no|without)\s+senior\b/.test(q) };
 }
 
 export function extractLocationInfo(text: string, url = ""): LocationInfo {
