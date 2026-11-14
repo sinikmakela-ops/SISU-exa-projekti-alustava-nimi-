@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { exaRequest, ExaPage, investigateOpportunitySources } from "@/lib/exa";
-import type { ChecklistItem, PracticalFact, SourceChecklistItem, VerifiedRequirement } from "@/lib/types";
+import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
+import type { ChecklistItem, Profile, PracticalFact, SourceChecklistItem, VerifiedRequirement } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -286,10 +287,13 @@ function canonicalPage(page: ExaPage, fallbackUrl?: string): ResearchPage | null
 
 export async function POST(request: Request) {
   try {
-    const { url, title, profile } = await request.json() as {
+    const { url, title, company, summary: opportunitySummary, type, profile } = await request.json() as {
       url?: string;
       title?: string;
-    profile?: { skills?: string; cvText?: string; documents?: string[] };
+      company?: string;
+      summary?: string;
+      type?: string;
+      profile?: Partial<Profile> & { documents?: string[] };
     };
     if (!url) return NextResponse.json({ error: "Select an opportunity with a source first." }, { status: 400 });
     let parsedUrl: URL;
@@ -314,8 +318,17 @@ export async function POST(request: Request) {
       }, { status: 502 });
     }
 
-    const hasCvText = Boolean(profile?.cvText?.trim());
-    const extraction = await extractWithOpenAI(pages, title ?? "", profile?.skills ?? "");
+    const safeProfile: Partial<Profile> = {
+      ...profile,
+      degree: sanitizeBackgroundText(profile?.degree ?? ""),
+      field: sanitizeBackgroundText(profile?.field ?? ""),
+      skills: sanitizeBackgroundText(profile?.skills ?? ""),
+      interests: sanitizeBackgroundText(profile?.interests ?? ""),
+      experience: sanitizeBackgroundText(profile?.experience ?? ""),
+      cvText: sanitizeBackgroundText(profile?.cvText ?? ""),
+    };
+    const hasCvText = Boolean(safeProfile.cvText?.trim());
+    const extraction = await extractWithOpenAI(pages, title ?? "", safeProfile.skills ?? "");
     const facts = extractVerifiedFacts(extraction, pages, hasCvText, profile?.documents ?? []);
     const sourceChecklist = createSourceChecklist(facts, hasCvText);
     const checklist = compatibilityChecklist(facts, hasCvText);
@@ -338,6 +351,13 @@ export async function POST(request: Request) {
         : recentPublication
           ? "Possibly open"
           : "Unknown";
+    const outreachDraft = createOutreachDraft(safeProfile, {
+      title: title ?? "Student opportunity",
+      company: company ?? research.organizationDomain,
+      type: type ?? "Student opportunity",
+      summary: sanitizeBackgroundText(opportunitySummary ?? ""),
+      source: { title: primary.title ?? title ?? "Source", url: primary.url, excerpt: "" },
+    }, facts);
 
     return NextResponse.json({
       source: { title: primary.title ?? title, url: primary.url, excerpt: primary.excerpt },
@@ -353,6 +373,8 @@ export async function POST(request: Request) {
       contactPerson: facts.contactPerson,
       applicationSteps: facts.applicationSteps,
       practicalFacts: facts.practicalFacts,
+      outreachDraft,
+      outreachDraftVersion: 2,
       verifiedRequirements: facts.verifiedRequirements,
       sourceChecklist,
       checklist,

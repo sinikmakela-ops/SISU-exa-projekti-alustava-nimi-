@@ -24,6 +24,7 @@ export type InvestigationData = {
   applicationSteps: Array<{ order: number; step: string; sourceUrl: string; evidenceExcerpt: string }>;
   practicalFacts?: PracticalFact[];
   outreachDraft?: string;
+  outreachDraftVersion?: 2;
   verifiedRequirements: VerifiedRequirement[];
   sourceChecklist: SourceChecklistItem[];
   checklist: ChecklistItem[];
@@ -54,6 +55,7 @@ export type Opportunity = {
   manualDocuments?: string[];
   investigation?: InvestigationData;
   outreachDraft?: string;
+  outreachDraftVersion?: 2;
   publishedDate?: string; saved?: boolean; stage?: string; checklist?: ChecklistItem[];
 };
 

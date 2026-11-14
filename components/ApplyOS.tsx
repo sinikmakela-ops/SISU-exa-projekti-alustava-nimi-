@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChecklistItem, InvestigationData, Opportunity, Profile, PracticalFact, SimilarOpportunity } from "@/lib/types";
+import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
+import type { ChecklistItem, InvestigationData, Opportunity, Profile, SimilarOpportunity } from "@/lib/types";
 
 const scenarios = [
   ["Suomi · Tampere · tuotantotalous", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."],
@@ -26,16 +27,6 @@ function safeHttpsUrl(value?: string | null, fallback?: string | null): string |
   }
   return null;
 }
-function buildOutreachDraft(profile: Profile, item: Opportunity, investigation?: InvestigationData): string {
-  const contact = investigation?.contactPerson?.name && investigation.contactPerson.name !== "Publicly listed contact" ? investigation.contactPerson.name : "Hiring team";
-  const skills = profile.skills.split(/[,;\n]/).map((value) => value.trim()).filter(Boolean).slice(0, 4);
-  const cvHighlight = (profile.cvText.split(/(?<=[.!?])\s+/).find((sentence) => skills.some((skill) => sentence.toLowerCase().includes(skill.toLowerCase()))) ?? profile.cvText.trim())?.slice(0, 220);
-  const terms = (investigation?.practicalFacts ?? []).filter((fact) => ["location", "duration", "startWindow", "compensation", "workMode"].includes(fact.category)).slice(0, 2);
-  const factLine = terms.length ? `I noticed this detail in the announcement: “${terms[0].evidenceExcerpt.slice(0, 200)}”` : "I have reviewed the opportunity announcement and would be glad to learn more about the role.";
-  const availability = profile.availability || (profile.graduation ? `Expected graduation: ${profile.graduation}` : "Availability: to be discussed");
-  return `Subject: Interest in ${item.title}\n\nDear ${contact},\n\nMy name is ${profile.name || "[Your name]"}, and I am ${profile.level.toLowerCase()}${profile.field ? ` studying ${profile.field}` : ""}${profile.university ? ` at ${profile.university}` : ""}. I am interested in the ${item.title} opportunity at ${item.company}.\n\n${skills.length ? `My relevant skills include ${skills.join(", ")}.` : profile.experience ? profile.experience.slice(0, 240) : "I would be happy to share more about my relevant experience."}${cvHighlight ? ` A relevant CV highlight is: ${cvHighlight}` : ""}\n\n${factLine} ${availability}.\n\nCould you please let me know the best next step to apply or discuss fit?\n\nKind regards,\n${profile.name || "[Your name]"}`;
-}
-
 export default function ApplyOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
@@ -88,16 +79,16 @@ export default function ApplyOS() {
   async function investigate(item: Opportunity) {
     setResearching(true); setError("");
     try {
-      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, profile: { ...profile, documents: item.manualDocuments ?? [] } }) });
+      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, company: item.company, summary: item.summary, type: item.type, profile: { ...profile, degree: sanitizeBackgroundText(profile.degree), field: sanitizeBackgroundText(profile.field), skills: sanitizeBackgroundText(profile.skills), interests: sanitizeBackgroundText(profile.interests), experience: sanitizeBackgroundText(profile.experience), cvText: sanitizeBackgroundText(profile.cvText), documents: item.manualDocuments ?? [] } }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Research failed.");
-      const generatedDraft = data.outreachDraft || buildOutreachDraft(profile, item, data as InvestigationData);
-      const investigation = { ...data, outreachDraft: generatedDraft } as InvestigationData;
+      const generatedDraft = data.outreachDraft || createOutreachDraft(profile, item, data as InvestigationData);
+      const investigation = { ...data, outreachDraft: generatedDraft, outreachDraftVersion: 2 } as InvestigationData;
       const checklist = (data.checklist || []).map((x: { label: string; status: ChecklistItem["status"] }, i: number) => ({ ...x, id: item.id + "-" + i }));
       setSummary(data.summary || "");
       setDraftMessage(generatedDraft);
-      setSelected((current) => current ? { ...current, checklist, investigation, outreachDraft: generatedDraft } : current);
-      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, investigation, outreachDraft: generatedDraft } : x));
+      setSelected((current) => current ? { ...current, checklist, investigation, outreachDraft: generatedDraft, outreachDraftVersion: 2 } : current);
+      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, investigation, outreachDraft: generatedDraft, outreachDraftVersion: 2 } : x));
     } catch (e) { setError(e instanceof Error ? e.message : "Research failed."); }
     finally { setResearching(false); }
   }
@@ -122,9 +113,10 @@ export default function ApplyOS() {
   }
 
   function openOpportunity(item: Opportunity) {
-    setSelected(item); setSummary(""); setDraftMessage(item.outreachDraft ?? item.investigation?.outreachDraft ?? (item.investigation ? buildOutreachDraft(profile, item, item.investigation) : ""));
+    const storedDraft = item.outreachDraftVersion === 2 ? item.outreachDraft : item.investigation?.outreachDraftVersion === 2 ? item.investigation.outreachDraft : undefined;
+    setSelected(item); setSummary(""); setDraftMessage(storedDraft ?? (item.investigation ? createOutreachDraft(profile, item, item.investigation) : ""));
   }
-  function resetDraft() { if (selected) updateDraft(buildOutreachDraft(profile, selected, selected.investigation)); }
+  function resetDraft() { if (selected) updateDraft(createOutreachDraft(profile, selected, selected.investigation)); }
   async function copyDraft() {
     try { await navigator.clipboard.writeText(draftMessage); setMessage("Draft copied to clipboard"); }
     catch { setError("Clipboard access is unavailable. Select and copy the draft text manually."); }
@@ -153,8 +145,8 @@ export default function ApplyOS() {
 
   function updateDraft(value: string) {
     setDraftMessage(value);
-    setSelected((current) => current ? { ...current, outreachDraft: value, investigation: current.investigation ? { ...current.investigation, outreachDraft: value } : current.investigation } : current);
-    setApps((current) => current.map((item) => selected && item.id === selected.id ? { ...item, outreachDraft: value, investigation: item.investigation ? { ...item.investigation, outreachDraft: value } : item.investigation } : item));
+    setSelected((current) => current ? { ...current, outreachDraft: value, outreachDraftVersion: 2, investigation: current.investigation ? { ...current.investigation, outreachDraft: value, outreachDraftVersion: 2 } : current.investigation } : current);
+    setApps((current) => current.map((item) => selected && item.id === selected.id ? { ...item, outreachDraft: value, outreachDraftVersion: 2, investigation: item.investigation ? { ...item.investigation, outreachDraft: value, outreachDraftVersion: 2 } : item.investigation } : item));
   }
 
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
