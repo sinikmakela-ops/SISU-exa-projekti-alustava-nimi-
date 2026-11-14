@@ -2,6 +2,7 @@ export type Profile = {
   name: string; degree: string; field: string; university: string; level: string;
   graduation: string; skills: string; interests: string; locations: string;
   preference: string; languages: string; experience: string; cvText: string;
+  notes?: string;
   roleMode?: "auto" | "internship" | "thesis" | "both";
   availability?: string;
 };
@@ -54,6 +55,9 @@ export type Opportunity = {
   locationLabel?: string;
   locationSnippet?: string | null;
   matchedTopics?: string[];
+  studyFieldMatch?: boolean;
+  studyFieldLabel?: string;
+  profileRelevanceBoost?: number;
   scoreBreakdown?: { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
   eligibilityStatus?: string;
   applicationStatus?: string;

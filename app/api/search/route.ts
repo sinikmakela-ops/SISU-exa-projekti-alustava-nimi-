@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
-import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, isLegitimateOpportunitySource, locationConstraintMatch, matchesStudentProfile, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, isLegitimateOpportunitySource, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
 import { classifyOpportunityPreview, classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation } from "@/lib/opportunity-classification";
 import type { Opportunity, Profile } from "@/lib/types";
 
@@ -9,8 +9,7 @@ export const runtime = "nodejs";
 type SearchPlan = { query: string; startPublishedDate?: string };
 
 function queriesFor(query: string, profile: Partial<Profile>, now = new Date()): SearchPlan[] {
-  const focus = [profile.field, profile.skills, profile.interests].filter(Boolean).join(" ").slice(0, 180);
-  const base = (query + " " + focus).trim();
+  const base = query;
   const mode = inferOpportunityRoleMode(query, profile.roleMode);
   const internshipQuery = base + " (internship OR traineeship OR harjoittelu OR harjoittelupaikka) student opportunity";
   const thesisQuery = base + " (master's thesis OR bachelor's thesis OR diplomityö OR gradutoimeksianto OR thesis worker) university company";
@@ -214,14 +213,10 @@ export async function POST(request: Request) {
     const sourceAudit = sourceReviews.map(({ raw, fullText, classification, legitimacy }) => {
       const sourceQuality = legitimacy.legitimate ? legitimacy.quality : null;
       if (classification.category !== "specific-opportunity") return { title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason: classification.reason, evidenceExcerpt: classification.evidenceExcerpt, sourceQuality };
-      const roleType = classifyOpportunity(raw.title ?? "", fullText).type;
       const roleScopeMatches = isAllowedRoleMode(raw.title ?? "", fullText, inferredRoleMode);
-      const profileFits = matchesStudentProfile(raw.title ?? "", roleType, fullText, body.profile ?? {}, inferredRoleMode);
       const reason = !roleScopeMatches
         ? `A specific student opportunity was found, but it does not match the selected ${inferredRoleMode} role scope.`
-        : !profileFits
-          ? "A specific student opportunity was found, but its source does not match the profile’s study field, level, or requested role type."
-          : classification.reason;
+        : classification.reason;
       return { title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason, evidenceExcerpt: classification.evidenceExcerpt, sourceQuality };
     });
     const relatedInformation: RelatedInformation[] = sourceReviews.flatMap(({ raw, classification }) => isUsefulRelatedInformation(classification) && raw.url ? [{ id: String(raw.id ?? raw.url), title: raw.title ?? "Application guidance", url: raw.url, excerpt: classification.evidenceExcerpt ?? "", category: classification.category, reason: classification.reason }] : []);
@@ -241,7 +236,7 @@ export async function POST(request: Request) {
     const specificCandidates = [...uniqueCandidates.values()].flatMap(({ raw, fullText, classification, legitimacy }) => {
       const item = normalize({ ...raw, text: fullText, highlights: [] }, query, body.profile ?? {}, now);
       const roleMode = inferOpportunityRoleMode(query, body.profile?.roleMode);
-      if (!item || !isAllowedRoleMode(item.title, fullText, roleMode) || !matchesStudentProfile(item.title, item.type, fullText, body.profile ?? {}, roleMode)) return [];
+      if (!item || !isAllowedRoleMode(item.title, fullText, roleMode)) return [];
       const evidence = classification.evidenceExcerpt ?? "";
       verifiedTextById.set(item.id, fullText);
       const availabilityStatus = classification.availability ?? "Unverified";
@@ -282,7 +277,7 @@ export async function POST(request: Request) {
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
-      return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
+      return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, studyFieldMatch: match.studyFieldMatch, studyFieldLabel: match.studyFieldLabel, profileRelevanceBoost: match.profileRelevanceBoost, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
     });
     const closedResults = ranked.filter((item) => item.availabilityStatus === "Closed");
     const unverifiedOpportunities = ranked.filter((item) => item.availabilityStatus === "Unverified");
@@ -292,8 +287,9 @@ export async function POST(request: Request) {
         const fresh = Number.isFinite(published) && published <= now.getTime() ? Math.max(0, 8 - Math.floor((now.getTime() - published) / (15 * 24 * 60 * 60 * 1000))) : 0;
         const open = item.availabilityStatus === "Open" ? 12 : item.availabilityStatus === "Upcoming" ? 10 : item.availabilityStatus === "Verified" ? 7 : 0;
         const cycle = /2026|2027/.test(item.programCycle ?? "") ? 5 : 0;
-        return item.match + fresh + open + cycle;
+        return item.match + (item.profileRelevanceBoost ?? 0) + fresh + open + cycle;
       };
+      if (Boolean(a.studyFieldMatch) !== Boolean(b.studyFieldMatch)) return a.studyFieldMatch ? -1 : 1;
       return priority(b) - priority(a);
     });
     const officialActive = active.filter((item) => item.sourceQuality === "official");

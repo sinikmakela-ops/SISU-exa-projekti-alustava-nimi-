@@ -5,7 +5,11 @@ import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
 import { opportunityResultsHeadline } from "@/lib/matching";
 import type { ChecklistItem, InvestigationData, Opportunity, Profile, RelatedInformation, SimilarOpportunity } from "@/lib/types";
 
-const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", cvText: "", roleMode: "auto", availability: "" };
+const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", notes: "", cvText: "", roleMode: "auto", availability: "" };
+type DocumentKind = "CV" | "Transcript" | "Portfolio" | "Other";
+type StudentDocument = { id: string; name: string; mimeType: string; size: number; uploadedAt: string; kind: DocumentKind; extractedText: string; preview: string; extractionStatus: string };
+type DocumentBundle = { documents: StudentDocument[]; activeCvId: string | null };
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 const manualDocumentOptions = ["CV", "Academic Transcript / Opintosuoritusote", "Portfolio / GitHub", "Motivation Letter"];
 const checklistDefaults: ChecklistItem[] = [
   { id: "cv", label: "CV", status: "Needs review" }, { id: "transcript", label: "Academic transcript", status: "Needs confirmation" },
@@ -14,7 +18,54 @@ const checklistDefaults: ChecklistItem[] = [
 ];
 
 function persist(key: string, value: unknown) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Local storage may be unavailable. */ } }
+function storeDocuments(documents: StudentDocument[], activeCvId: string | null) {
+  localStorage.setItem("applyos.documents", JSON.stringify({ documents, activeCvId } satisfies DocumentBundle));
+}
+function openDocumentDb() { return new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("paveos-documents", 1); request.onupgradeneeded = () => request.result.createObjectStore("files"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("This browser could not open local document storage.")); }); }
+async function storeDocumentFile(id: string, file: File) { const db = await openDocumentDb(); await new Promise<void>((resolve, reject) => { const transaction = db.transaction("files", "readwrite"); transaction.objectStore("files").put(file, id); transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(new Error("This file could not be saved in the browser.")); transaction.onabort = () => reject(new Error("This file could not be saved in the browser.")); }); db.close(); }
+async function readDocumentFile(id: string) { const db = await openDocumentDb(); const blob = await new Promise<Blob | undefined>((resolve, reject) => { const request = db.transaction("files", "readonly").objectStore("files").get(id); request.onsuccess = () => resolve(request.result as Blob | undefined); request.onerror = () => reject(new Error("This saved file could not be opened.")); }); db.close(); return blob; }
+async function deleteDocumentFile(id: string) { const db = await openDocumentDb(); await new Promise<void>((resolve, reject) => { const transaction = db.transaction("files", "readwrite"); transaction.objectStore("files").delete(id); transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(new Error("This file could not be removed from local storage.")); }); db.close(); }
+async function extractPdfText(file: File) {
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).toString();
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const pages: string[] = [];
+  for (let number = 1; number <= Math.min(pdf.numPages, 12); number++) { const page = await pdf.getPage(number); const content = await page.getTextContent(); pages.push(content.items.map((item) => "str" in item ? item.str : "").join(" ")); }
+  return pages.join("\n").slice(0, 24000).trim();
+}
+async function extractDocxText(file: File) {
+  const bytes = new Uint8Array(await file.arrayBuffer()), view = new DataView(bytes.buffer);
+  let end = -1;
+  for (let index = Math.max(0, bytes.length - 65_557); index <= bytes.length - 22; index++) if (view.getUint32(index, true) === 0x06054b50) end = index;
+  if (end < 0) throw new Error("This DOCX archive could not be read.");
+  const count = view.getUint16(end + 10, true); let cursor = view.getUint32(end + 16, true); let xml = "";
+  for (let index = 0; index < count && cursor + 46 <= bytes.length; index++) {
+    if (view.getUint32(cursor, true) !== 0x02014b50) break;
+    const method = view.getUint16(cursor + 10, true), compressedSize = view.getUint32(cursor + 20, true), nameLength = view.getUint16(cursor + 28, true), extraLength = view.getUint16(cursor + 30, true), commentLength = view.getUint16(cursor + 32, true), localOffset = view.getUint32(cursor + 42, true);
+    const name = new TextDecoder().decode(bytes.slice(cursor + 46, cursor + 46 + nameLength));
+    if (name === "word/document.xml") {
+      const localNameLength = view.getUint16(localOffset + 26, true), localExtraLength = view.getUint16(localOffset + 28, true), dataStart = localOffset + 30 + localNameLength + localExtraLength, compressed = bytes.slice(dataStart, dataStart + compressedSize);
+      if (method === 0) xml = new TextDecoder().decode(compressed);
+      else if (method === 8) { const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw" as CompressionFormat)); xml = await new Response(stream).text(); }
+      else throw new Error("This DOCX compression format is not supported.");
+      break;
+    }
+    cursor += 46 + nameLength + extraLength + commentLength;
+  }
+  if (!xml) throw new Error("No document text was found in this DOCX file.");
+  const documentXml = new DOMParser().parseFromString(xml, "application/xml");
+  if (documentXml.querySelector("parsererror")) throw new Error("The DOCX text could not be decoded.");
+  return Array.from(documentXml.getElementsByTagName("*" )).filter((node) => node.localName === "t").map((node) => node.textContent ?? "").join(" ").replace(/\s+/g, " ").slice(0, 24000).trim();
+}
+async function extractDocumentText(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "txt") return file.text().then((text) => text.slice(0, 24000).trim());
+  if (extension === "pdf") return extractPdfText(file);
+  if (extension === "docx") return extractDocxText(file);
+  throw new Error("Choose a PDF, DOCX, or TXT file.");
+}
 function formatSafeTimestamp(value?: string | null) { const d = value ? new Date(value) : new Date(); return Number.isNaN(d.getTime()) ? "Just now" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }
+function formatFileSize(bytes: number) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
 function safeHttpsUrl(value?: string | null, fallback?: string | null): string | null {
   for (const candidate of [value, fallback]) {
     if (!candidate || candidate === "#" || /^(undefined|null)$/i.test(candidate.trim())) continue;
@@ -41,6 +92,10 @@ export default function PaveOS() {
   const [summary, setSummary] = useState("");
   const [draftMessage, setDraftMessage] = useState("");
   const [cvName, setCvName] = useState("");
+  const [documents, setDocuments] = useState<StudentDocument[]>([]);
+  const [activeCvId, setActiveCvId] = useState<string | null>(null);
+  const [documentsLoaded, setDocumentsLoaded] = useState(false);
+  const [uploadKind, setUploadKind] = useState<DocumentKind>("CV");
   const [navOpen, setNavOpen] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [similarById, setSimilarById] = useState<Record<string, { loading: boolean; results: SimilarOpportunity[]; error: string }>>({});
@@ -52,10 +107,14 @@ export default function PaveOS() {
       if (p) setProfile({ ...empty, ...JSON.parse(p) });
       if (a) setApps(JSON.parse(a));
       setCvName(localStorage.getItem("applyos.cvName") || "");
+      const savedDocuments = localStorage.getItem("applyos.documents");
+      if (savedDocuments) { const bundle = JSON.parse(savedDocuments) as DocumentBundle; setDocuments(Array.isArray(bundle.documents) ? bundle.documents : []); setActiveCvId(bundle.activeCvId ?? null); }
     } catch { /* Start with a clean local profile. */ }
+    finally { setDocumentsLoaded(true); }
   }, []);
   useEffect(() => { persist("applyos.profile", profile); }, [profile]);
   useEffect(() => { persist("applyos.applications", apps); }, [apps]);
+  useEffect(() => { if (documentsLoaded) { try { storeDocuments(documents, activeCvId); } catch { /* Upload and remove handlers report storage errors before updating state. */ } } }, [documents, activeCvId, documentsLoaded]);
   useEffect(() => { if (message) { const t = setTimeout(() => setMessage(""), 2800); return () => clearTimeout(t); } }, [message]);
 
   const saved = useMemo(() => new Set(apps.map((x) => x.id)), [apps]);
@@ -146,23 +205,62 @@ export default function PaveOS() {
     setApps((current) => current.map((item) => selected && item.id === selected.id ? { ...item, outreachDraft: value, outreachDraftVersion: 2, investigation: item.investigation ? { ...item.investigation, outreachDraft: value, outreachDraftVersion: 2 } : item.investigation } : item));
   }
 
+  function saveProfile() {
+    try { localStorage.setItem("applyos.profile", JSON.stringify(profile)); setMessage("Profile saved on this device"); }
+    catch { setError("This browser could not save the profile. Free some local storage and try again."); }
+  }
+
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]; if (!file) return;
-    setError(""); setCvName(file.name); localStorage.setItem("applyos.cvName", file.name);
-    try {
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).toString();
-      const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-      const pages: string[] = [];
-      for (let n = 1; n <= Math.min(pdf.numPages, 12); n++) {
-        const page = await pdf.getPage(n); const content = await page.getTextContent();
-        pages.push(content.items.map((x) => "str" in x ? x.str : "").join(" "));
-      }
-      const text = pages.join("\n").slice(0, 24000);
-      if (!text.trim()) throw new Error("No selectable text found. Paste your CV text below.");
-      setProfile((p) => ({ ...p, cvText: text })); setMessage("CV text extracted locally and saved on this device");
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not read the PDF. Paste your CV text below."); }
-    event.target.value = "";
+    const files = Array.from(event.target.files ?? []); event.target.value = "";
+    if (!files.length) return;
+    setError("");
+    let nextDocuments = [...documents], nextActiveCvId = activeCvId, nextCvText = profile.cvText, nextCvName = cvName;
+    const issues: string[] = [];
+    for (const file of files) {
+      if (file.size > MAX_DOCUMENT_BYTES) { issues.push(`${file.name}: files must be 10 MB or smaller.`); continue; }
+      const extension = file.name.split(".").pop()?.toLowerCase();
+      if (!extension || !["pdf", "docx", "txt"].includes(extension)) { issues.push(`${file.name}: choose a PDF, DOCX, or TXT file.`); continue; }
+      let extractedText = "", extractionStatus = "Text extracted locally";
+      try { extractedText = await extractDocumentText(file); if (!extractedText) extractionStatus = "File saved; no selectable text was found."; }
+      catch (cause) { extractionStatus = cause instanceof Error ? cause.message : "Text extraction failed; file was saved."; }
+      const id = crypto.randomUUID();
+      try { await storeDocumentFile(id, file); }
+      catch (cause) { issues.push(`${file.name}: ${cause instanceof Error ? cause.message : "Could not save file."}`); continue; }
+      nextDocuments.push({ id, name: file.name, mimeType: file.type || "application/octet-stream", size: file.size, uploadedAt: new Date().toISOString(), kind: uploadKind, extractedText, preview: extractedText.slice(0, 500), extractionStatus });
+      if (uploadKind === "CV") { nextActiveCvId = id; nextCvText = extractedText; nextCvName = file.name; }
+    }
+    if (nextDocuments.length === documents.length) { if (issues.length) setError(issues.join(" ")); return; }
+    try { storeDocuments(nextDocuments, nextActiveCvId); }
+    catch (cause) { for (const documentFile of nextDocuments.slice(documents.length)) void deleteDocumentFile(documentFile.id); setError(cause instanceof Error ? cause.message : "The browser could not store these documents."); return; }
+    setDocuments(nextDocuments); setActiveCvId(nextActiveCvId);
+    if (nextCvName !== cvName) { setCvName(nextCvName); localStorage.setItem("applyos.cvName", nextCvName); }
+    if (nextCvText !== profile.cvText) setProfile((current) => ({ ...current, cvText: nextCvText }));
+    if (issues.length) { setError(issues.join(" ")); setMessage("Available files were saved"); }
+    else setMessage(uploadKind === "CV" ? "CV saved and set as active" : "Documents saved on this device");
+  }
+
+  function setActiveCv(documentFile: StudentDocument) {
+    try { storeDocuments(documents, documentFile.id); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save the active CV selection."); return; }
+    setActiveCvId(documentFile.id); setCvName(documentFile.name); localStorage.setItem("applyos.cvName", documentFile.name);
+    setProfile((current) => ({ ...current, cvText: documentFile.extractedText })); setMessage(`${documentFile.name} is now your active CV`);
+  }
+
+  async function downloadDocument(documentFile: StudentDocument) {
+    try { const file = await readDocumentFile(documentFile.id); if (!file) throw new Error("The original file is no longer in this browser's storage."); const url = URL.createObjectURL(file); const anchor = document.createElement("a"); anchor.href = url; anchor.download = documentFile.name; anchor.click(); URL.revokeObjectURL(url); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not download this document."); }
+  }
+
+  async function removeDocument(documentId: string) {
+    const nextDocuments = documents.filter((documentFile) => documentFile.id !== documentId);
+    const removingActiveCv = activeCvId === documentId;
+    const nextActiveCvId = removingActiveCv ? null : activeCvId;
+    try { storeDocuments(nextDocuments, nextActiveCvId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not update saved documents."); return; }
+    setDocuments(nextDocuments); setActiveCvId(nextActiveCvId);
+    if (removingActiveCv) { setCvName(""); localStorage.removeItem("applyos.cvName"); setProfile((current) => ({ ...current, cvText: "" })); }
+    try { await deleteDocumentFile(documentId); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not remove the file data."); return; }
+    setMessage("Document removed from this device");
   }
 
   const firstName = profile.name.trim().split(/\s+/)[0] || "there";
@@ -182,7 +280,7 @@ export default function PaveOS() {
       <header className="topbar"><button className="mobile-menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button><div className="crumb">Workspace <span>/</span> <b>{screen === "discover" ? "Discover" : screen === "apps" ? "My applications" : "Student profile"}</b></div><div className="privacy-status"><i/> Your profile is private <button onClick={() => setScreen("profile")}>{firstName[0]?.toUpperCase()}</button></div></header>
       <div className="content">
         {screen === "profile" ? <section className="profile-view">
-          <div className="page-head"><div><label>YOUR PRIVATE PROFILE</label><h1>Student profile</h1><p>Build your profile once. Pave.OS uses it to personalize every search.</p></div><button className="primary" onClick={() => { setScreen("discover"); setMessage("Profile saved on this device"); }}>Save profile ✓</button></div>
+          <div className="page-head"><div><label>YOUR PRIVATE PROFILE</label><h1>Student profile</h1><p>Build your profile once. Pave.OS uses it to personalize every search.</p></div><button className="primary" onClick={saveProfile}>Save profile ✓</button></div>
           <div className="profile-layout"><div>
             <section className="panel"><div className="panel-head"><span className="panel-symbol purple">♙</span><div><h3>About you</h3><p>Only broad search criteria leave your browser.</p></div></div><div className="fields">
               <Field label="Your name" value={profile.name} update={(v) => setProfile((p) => ({ ...p, name: v }))} placeholder="First and last name"/>
@@ -195,14 +293,16 @@ export default function PaveOS() {
               <Field wide label="Skills" value={profile.skills} update={(v) => setProfile((p) => ({ ...p, skills: v }))} placeholder="Python, research, data analysis"/>
               <Field wide label="Research & industry interests" value={profile.interests} update={(v) => setProfile((p) => ({ ...p, interests: v }))} placeholder="What would you love to work on?"/>
               <Field wide label="Experience & projects" value={profile.experience} update={(v) => setProfile((p) => ({ ...p, experience: v }))} placeholder="Relevant roles, research, projects"/>
+              <label className="field wide"><span>Notes & merits</span><textarea rows={3} value={profile.notes ?? ""} onChange={(event) => setProfile((p) => ({ ...p, notes: event.target.value }))} placeholder="Achievements, awards, strengths, or anything else to highlight"/></label>
               <Field wide label="Preferred locations" value={profile.locations} update={(v) => setProfile((p) => ({ ...p, locations: v }))} placeholder="Finland, Helsinki, remote"/>
               <label className="field"><span>Opportunity type</span><select value={profile.roleMode ?? "auto"} onChange={(e) => setProfile((p) => ({ ...p, roleMode: e.target.value as Profile["roleMode"] }))}><option value="auto">Infer from my search</option><option value="internship">Internship / Trainee only</option><option value="thesis">Master's / Bachelor's Thesis only</option><option value="both">Both</option></select></label>
               <label className="field"><span>Work preference</span><select value={profile.preference} onChange={(e) => setProfile((p) => ({ ...p, preference: e.target.value }))}><option>Hybrid or remote</option><option>Remote</option><option>Hybrid</option><option>On-site</option><option>Any</option></select></label>
               <Field label="Languages" value={profile.languages} update={(v) => setProfile((p) => ({ ...p, languages: v }))} placeholder="Finnish, English"/>
             </div></section>
-            <section className="panel"><div className="panel-head"><span className="panel-symbol green">▤</span><div><h3>Your CV, on your device</h3><p>PDF text is extracted in your browser. The original file is never uploaded.</p></div></div>
-              <button className="upload" onClick={() => inputRef.current?.click()}><span>＋</span><div><b>{cvName || "Upload a CV as PDF"}</b><small>{cvName ? "Saved locally · upload a new version" : "Select a PDF, up to 10 MB"}</small></div><em>Choose file</em></button>
-              <label className="field wide cv-field"><span>Or paste CV text <small>— saved locally on this device</small></span><textarea rows={5} value={profile.cvText} onChange={(e) => setProfile((p) => ({ ...p, cvText: e.target.value }))} placeholder="Paste relevant CV text here…"/></label>
+            <section className="panel"><div className="panel-head"><span className="panel-symbol green">▤</span><div><h3>Your documents, on this device</h3><p>PDF, DOCX, and TXT files are stored locally. Text extraction runs in your browser.</p></div></div>
+              <div className="document-upload-row"><label className="field"><span>Document type</span><select value={uploadKind} onChange={(event) => setUploadKind(event.target.value as DocumentKind)}><option>CV</option><option>Transcript</option><option>Portfolio</option><option>Other</option></select></label><button className="upload" onClick={() => inputRef.current?.click()}><span>＋</span><div><b>Add documents</b><small>Choose one or more PDF, DOCX, or TXT files (10 MB max each)</small></div><em>Choose files</em></button></div>
+              {documents.length > 0 && <div className="document-list">{documents.map((documentFile) => <article className="student-document" key={documentFile.id}><div className="student-document-head"><div><span className="document-kind">{documentFile.kind}{activeCvId === documentFile.id ? " · ACTIVE CV" : ""}</span><b>{documentFile.name}</b><small>Added {formatSafeTimestamp(documentFile.uploadedAt)} · {formatFileSize(documentFile.size)}</small></div><div className="document-actions"><button onClick={() => void downloadDocument(documentFile)}>Download</button>{documentFile.kind === "CV" && activeCvId !== documentFile.id && <button onClick={() => setActiveCv(documentFile)}>Set as active CV</button>}<button className="remove-document" onClick={() => void removeDocument(documentFile.id)}>Delete</button></div></div><small className="extraction-status">{documentFile.extractionStatus}</small>{documentFile.preview && <p className="document-preview">{documentFile.preview}{documentFile.extractedText.length > documentFile.preview.length ? "…" : ""}</p>}</article>)}</div>}
+              <label className="field wide cv-field"><span>Active CV text <small>— saved locally on this device</small></span><textarea rows={5} value={profile.cvText} onChange={(e) => setProfile((p) => ({ ...p, cvText: e.target.value }))} placeholder="Upload a CV or paste relevant CV text here…"/></label>
               {error && <div className="inline-error">{error}</div>}<div className="local-note">⌑ Your CV text stays in this browser and is never sent to Exa or OpenAI.</div>
             </section>
           </div><aside className="side-panels"><div className="profile-score"><div className="score">{[profile.field, profile.university, profile.skills, profile.interests].filter(Boolean).length * 25}<small>%</small></div><h3>Your profile is taking shape</h3><p>Add your background and skills to get closer matches.</p>{["Study details", "Skills & interests", "Experience", "CV text"].map((t, i) => <div className="todo" key={t}><i>{[profile.field && profile.university, profile.skills || profile.interests, profile.experience, profile.cvText][i] ? "✓" : "+"}</i>{t}</div>)}</div><div className="privacy-card"><span>⌑</span><b>Private by default</b><p>Your profile, parsed CV, checklist and saved applications stay in this browser. Only broad, non-identifying criteria go to Exa.</p></div></aside></div>
@@ -234,7 +334,7 @@ export default function PaveOS() {
     </section>
     {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} similar={similarById[selected.id]} draftMessage={draftMessage} onDraftChange={updateDraft} onDraftReset={resetDraft} onDraftCopy={() => void copyDraft()} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)} onSimilar={() => void findSimilar(selected)} onManualDocument={(document) => toggleManualDocument(selected.id, document)}/>}
     {message && <div className="toast">✓ &nbsp; {message}</div>}
-    <input ref={inputRef} hidden type="file" accept=".pdf,application/pdf" onChange={upload}/>
+    <input ref={inputRef} hidden type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" multiple onChange={upload}/>
   </main>;
 }
 
@@ -292,7 +392,7 @@ function OpportunityCard({ item, saved, index, similar, onSave, onOpen, onSimila
   const published = item.publishedDate && !Number.isNaN(Date.parse(item.publishedDate)) ? new Date(item.publishedDate).toLocaleDateString() : "Publication date unknown";
   return <article className="opportunity" style={{ animationDelay: index * 60 + "ms" }}>
     <div className="opportunity-head"><span className={"company-mark mark-" + (index % 4)}>{item.company.slice(0, 2).toUpperCase()}</span><div className="company-info"><div><b>{item.company}</b><span className={"source-found" + (item.sourceQuality ? ` source-quality-${item.sourceQuality}` : "")}>◉ {item.sourceQualityNote || "Source found"}</span></div><h3>{item.title}<i>{item.type}</i></h3></div><button className={saved ? "bookmark saved" : "bookmark"} onClick={onSave} aria-label={saved ? "Remove saved opportunity" : "Save opportunity"}>{saved ? "♥" : "♡"}</button></div>
-    <div className="opportunity-badges"><span className="role-badge">{item.type}</span><span className="published-badge">◷ Published · {published}</span></div>
+    <div className="opportunity-badges"><span className="role-badge">{item.type}</span><span className="published-badge">◷ Published · {published}</span>{item.studyFieldMatch && item.studyFieldLabel && <span className="field-priority-badge">Prioritized for your study field: {item.studyFieldLabel}</span>}</div>
     <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.locationLabel || item.location}{item.locationSnippet ? ` · “${item.locationSnippet}”` : ""}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : item.applicationNote || (item.qualificationStatus === "Verified" ? "Rolling / deadline not listed" : item.programCycle ? "Program cycle · " + item.programCycle : "Deadline not verified")}</span><span className={isOpen ? "status open" : "status"}><i/>{statusLabel}</span></div>
     {item.confirmationNote && <p className="confirmation-note">{item.confirmationNote}</p>}{item.classificationReason && <p className="classification-reason">{item.classificationReason}</p>}
     <div className="match"><span><i style={{ width: item.match + "%" }}/></span><b>{item.match}% match</b><em>· {item.matchReason}</em></div>
