@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
-import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, isLegitimateOpportunitySource, locationConstraintMatch, matchesStudentProfile, parseSearchConstraints } from "@/lib/matching";
 import { classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation, type SourceClassification } from "@/lib/opportunity-classification";
 import type { Opportunity, Profile } from "@/lib/types";
 
@@ -176,7 +176,7 @@ export async function POST(request: Request) {
       else merged.set(key, { ...prior, ...page, text: [prior.text, page.text].filter(Boolean).join("\n"), highlights: [...new Set([...(prior.highlights ?? []), ...(page.highlights ?? [])])], summary: prior.summary || page.summary });
     }
     const rawPages = [...merged.values()];
-    const looksPromising = (page: ExaPage) => /\b(intern(ship)?|trainee(ship)?|summer student|student assistant|research assistant|thesis|diplomity[oö]|gradutoimeksianto|student (program(me)?|fellowship|opportunity)|fellowship for students|scholarship for students|careers|how to apply)\b/i.test(`${page.title ?? ""} ${page.url ?? ""} ${page.text ?? ""} ${(page.highlights ?? []).join(" ")}`)
+    const looksPromising = (page: ExaPage) => /\b(intern(ship)?|trainee(ship)?|summer student|student|research assistant|thesis|diplomity[oö]|gradutoimeksianto|harjoittel\w*|kesäty\w*|junior|entry[- ]level|fellowship|scholarship|careers|how to apply)\b/i.test(`${page.title ?? ""} ${page.url ?? ""} ${page.text ?? ""} ${(page.highlights ?? []).join(" ")}`)
       && !/linkedin\.com\/in\/|\/people\/|\/staff\/|\/profile\//i.test(`${page.url ?? ""} ${page.title ?? ""}`);
     const contentCandidates = rawPages.filter(looksPromising).slice(0, 18);
     const contentFailures: string[] = [];
@@ -196,16 +196,34 @@ export async function POST(request: Request) {
       const searchText = [raw.text, ...(raw.highlights ?? []), raw.summary].filter((value): value is string => Boolean(value)).join("\n");
       const fullText = pageContent ? [pageContent.text, ...(pageContent.highlights ?? []), pageContent.summary].filter((value): value is string => Boolean(value)).join("\n") : searchText;
       const isCandidate = looksPromising(raw);
-      const classification = isCandidate && !pageContent
+      let classification = isCandidate && !pageContent
         ? { category: "unretrievable", availability: null, reason: contentFailures.length ? "The candidate page could not be retrieved, so APPLYOS cannot verify it." : "This specific-looking result was not among the source pages retrieved for verification.", evidenceExcerpt: null, applicationRoute: "none" } as SourceClassification
         : classifyOpportunitySource({ title: raw.title ?? "Untitled source", url: raw.url ?? "", text: fullText, deadlineIsPast: parseOpportunityDeadline(fullText, raw.highlights ?? [], now.toISOString().slice(0, 10))?.isPast });
-      return { raw, pageContent, fullText, classification };
+      const legitimacy = isLegitimateOpportunitySource(raw.url ?? "", raw.title ?? "", fullText);
+      if (classification.category === "specific-opportunity" && !legitimacy.legitimate) {
+        classification = { ...classification, category: "irrelevant", availability: null, reason: legitimacy.reason };
+      }
+      return { raw, pageContent, fullText, classification, legitimacy };
     });
 
     const sourceCounts = sourceReviews.reduce<Record<string, number>>((counts, review) => {
       counts[review.classification.category] = (counts[review.classification.category] ?? 0) + 1;
       return counts;
     }, {});
+    const inferredRoleMode = inferOpportunityRoleMode(query, body.profile?.roleMode);
+    const sourceAudit = sourceReviews.map(({ raw, fullText, classification, legitimacy }) => {
+      const sourceQuality = legitimacy.legitimate ? legitimacy.quality : null;
+      if (classification.category !== "specific-opportunity") return { title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason: classification.reason, evidenceExcerpt: classification.evidenceExcerpt, sourceQuality };
+      const roleType = classifyOpportunity(raw.title ?? "", fullText).type;
+      const roleScopeMatches = isAllowedRoleMode(raw.title ?? "", fullText, inferredRoleMode);
+      const profileFits = matchesStudentProfile(raw.title ?? "", roleType, fullText, body.profile ?? {}, inferredRoleMode);
+      const reason = !roleScopeMatches
+        ? `A specific student opportunity was found, but it does not match the selected ${inferredRoleMode} role scope.`
+        : !profileFits
+          ? "A specific student opportunity was found, but its source does not match the profile’s study field, level, or requested role type."
+          : classification.reason;
+      return { title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason, evidenceExcerpt: classification.evidenceExcerpt, sourceQuality };
+    });
     const relatedInformation: RelatedInformation[] = sourceReviews.flatMap(({ raw, classification }) => isUsefulRelatedInformation(classification) && raw.url ? [{ id: String(raw.id ?? raw.url), title: raw.title ?? "Application guidance", url: raw.url, excerpt: classification.evidenceExcerpt ?? "", category: classification.category, reason: classification.reason }] : []);
 
     const candidateReviews = sourceReviews.filter(({ classification, pageContent }) => pageContent && classification.category === "specific-opportunity");
@@ -213,17 +231,27 @@ export async function POST(request: Request) {
     for (const review of candidateReviews) {
       const key = opportunityDeduplicationKey(review.raw.title ?? "", review.raw.url ?? "");
       const existing = uniqueCandidates.get(key);
-      if (!existing || review.classification.availability === "Open" || review.classification.availability === "Upcoming") uniqueCandidates.set(key, review);
+      const prefersOfficialSource = existing?.legitimacy.quality === "secondary" && review.legitimacy.quality === "official";
+      const hasStrongerStatus = (review.classification.availability === "Open" || review.classification.availability === "Upcoming") && existing?.classification.availability === "Verified";
+      if (!existing || prefersOfficialSource || hasStrongerStatus) uniqueCandidates.set(key, review);
     }
     const sourceDomains = [...new Set([...uniqueCandidates.values()].flatMap(({ raw }) => { try { return [new URL(raw.url!).hostname.replace(/^www\./, "")]; } catch { return []; } }))];
 
     const verifiedTextById = new Map<string, string>();
-    const specificCandidates = [...uniqueCandidates.values()].flatMap(({ raw, fullText, classification }) => {
+    const specificCandidates = [...uniqueCandidates.values()].flatMap(({ raw, fullText, classification, legitimacy }) => {
       const item = normalize({ ...raw, text: fullText, highlights: [] }, query, body.profile ?? {}, now);
-      if (!item || !isAllowedRoleMode(item.title, fullText, inferOpportunityRoleMode(query, body.profile?.roleMode))) return [];
+      const roleMode = inferOpportunityRoleMode(query, body.profile?.roleMode);
+      if (!item || !isAllowedRoleMode(item.title, fullText, roleMode) || !matchesStudentProfile(item.title, item.type, fullText, body.profile ?? {}, roleMode)) return [];
       const evidence = classification.evidenceExcerpt ?? "";
       verifiedTextById.set(item.id, fullText);
-      return [{ ...item, status: opportunityAvailabilityStatus(classification.availability ?? "Unverified"), availabilityStatus: classification.availability ?? "Unverified", classificationReason: classification.reason, classificationEvidence: evidence, source: { ...item.source, excerpt: evidence } }];
+      const availabilityStatus = classification.availability ?? "Unverified";
+      const qualifiesAsVerified = availabilityStatus !== "Closed" && availabilityStatus !== "Unverified";
+      const applicationNote = qualifiesAsVerified && !item.deadline ? classification.generalProgram ? "General trainee/thesis program — reach out directly" : "Rolling / deadline not listed" : undefined;
+      const sourceQualityNote = legitimacy.quality === "official" ? "Verified · Official source" : "Verified · Secondary source (confirm on host site)";
+      const confirmationNote = legitimacy.quality === "secondary" ? "Confirm current intake window on the employer's official site." : availabilityStatus === "Unverified" ? "Confirm the current intake window directly with the organization." : undefined;
+      const applicationStatus = availabilityStatus === "Verified" ? "Verified" : availabilityStatus === "Open" ? "Open" : availabilityStatus === "Upcoming" ? item.applicationStatus?.startsWith("Upcoming") ? item.applicationStatus : "Upcoming" : item.applicationStatus;
+      const sourceQuality = legitimacy.quality === "secondary" ? "secondary" as const : "official" as const;
+      return [{ ...item, status: opportunityAvailabilityStatus(availabilityStatus), availabilityStatus, qualificationStatus: qualifiesAsVerified ? "Verified" as const : undefined, sourceQuality, sourceQualityNote, confirmationNote, applicationStatus, applicationNote, classificationReason: classification.reason, classificationEvidence: evidence, source: { ...item.source, excerpt: evidence } }];
     });
 
     const constraints = parseSearchConstraints(query, body.profile ?? {});
@@ -244,7 +272,7 @@ export async function POST(request: Request) {
       const conflict = degreeConflict || travelConflict;
       const closed = Boolean(deadlinePast || cycle?.isPast || academicCycle?.isPast || item.availabilityStatus === "Closed");
       const applicationStatus = closed ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadline?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : item.applicationStatus ?? item.status;
-      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, availabilityStatus: closed ? "Closed" as const : item.availabilityStatus, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
+      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, availabilityStatus: closed ? "Closed" as const : item.availabilityStatus, qualificationStatus: closed ? undefined : item.qualificationStatus, applicationNote: closed ? undefined : item.applicationNote, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
     });
     const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`, item.source.url), constraints, `${item.title} ${verifiedTextById.get(item.id) ?? item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
     const extracted = await extractWithOpenAI(eligible, query);
@@ -254,19 +282,24 @@ export async function POST(request: Request) {
     });
     const closedResults = ranked.filter((item) => item.availabilityStatus === "Closed");
     const unverifiedOpportunities = ranked.filter((item) => item.availabilityStatus === "Unverified");
-    const active = ranked.filter((item) => item.availabilityStatus === "Open" || item.availabilityStatus === "Upcoming").sort((a, b) => {
+    const active = ranked.filter((item) => item.availabilityStatus === "Open" || item.availabilityStatus === "Upcoming" || item.availabilityStatus === "Verified").sort((a, b) => {
       const priority = (item: Opportunity) => {
         const published = item.publishedDate ? Date.parse(item.publishedDate) : NaN;
         const fresh = Number.isFinite(published) && published <= now.getTime() ? Math.max(0, 8 - Math.floor((now.getTime() - published) / (15 * 24 * 60 * 60 * 1000))) : 0;
-        const open = item.status === "Verified open" ? 12 : item.applicationStatus?.startsWith("Upcoming") ? 10 : item.status === "Possibly open" ? 5 : 0;
+        const open = item.availabilityStatus === "Open" ? 12 : item.availabilityStatus === "Upcoming" ? 10 : item.availabilityStatus === "Verified" ? 7 : 0;
         const cycle = /2026|2027/.test(item.programCycle ?? "") ? 5 : 0;
         return item.match + fresh + open + cycle;
       };
       return priority(b) - priority(a);
     });
+    const officialActive = active.filter((item) => item.sourceQuality === "official");
+    const secondaryConfirmations = active.filter((item) => item.sourceQuality === "secondary");
+    const availabilityConfirmations = ranked.filter((item) => item.availabilityStatus === "Unverified");
+    const confirmationOpportunities = [...secondaryConfirmations, ...availabilityConfirmations];
 
     return NextResponse.json({
-      opportunities: active,
+      opportunities: officialActive,
+      confirmationOpportunities,
       closedOpportunities: closedResults,
       unverifiedOpportunities,
       relatedInformation,
@@ -274,12 +307,14 @@ export async function POST(request: Request) {
       constraintExplanation: !active.length && constraints.locations.length && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
-        sourceAudit: sourceReviews.map(({ raw, classification }) => ({ title: raw.title ?? "Untitled source", url: raw.url ?? "", category: classification.category, reason: classification.reason, evidenceExcerpt: classification.evidenceExcerpt })),
+        sourceAudit,
         freshnessStart: plan.find((item) => item.startPublishedDate)?.startPublishedDate ?? null,
         sources: rawPages.length,
         fetched: rawPages.length,
         studentRoles: candidateReviews.length,
-        opportunityPages: candidateReviews.length,
+        opportunityPages: officialActive.length,
+        secondaryPages: secondaryConfirmations.length,
+        confirmationPages: confirmationOpportunities.length,
         guidancePages: sourceCounts["application-guidance"] ?? 0,
         overviewPages: sourceCounts["organization-overview"] ?? 0,
         profilePages: sourceCounts["personal-profile"] ?? 0,
@@ -292,7 +327,7 @@ export async function POST(request: Request) {
         duplicatesMerged: successful.reduce((total, run) => total + run.results.length, 0) - rawPages.length + candidateReviews.length - uniqueCandidates.size,
         sourceDomains,
         roleMode: inferOpportunityRoleMode(query, body.profile?.roleMode),
-        returned: active.length,
+        returned: officialActive.length,
         filteredOutExpired: closedResults.length,
         failedContents: contentFailures,
         contentsReviewed: contentByUrl.size,

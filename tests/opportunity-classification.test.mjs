@@ -25,8 +25,25 @@ test("thesis project explicitly inviting proposals qualifies as a specific oppor
   const result = classifyOpportunitySource({ title: "Master's Thesis Project: Battery Diagnostics", url: "https://example.edu/thesis/battery", text: "Master's thesis project investigating battery diagnostics in the energy systems group. We invite students to propose a thesis topic and contact the supervisor to agree on a project. The work is intended for a current graduate student." });
   assert.equal(result.category, "specific-opportunity");
   assert.equal(result.applicationRoute, "propose");
-  assert.equal(result.availability, "Unverified");
-  assert.equal(canShowAsUnverifiedOpportunity(result), true);
+  assert.equal(result.availability, "Verified");
+  assert.equal(canShowAsActiveOpportunity(result), true);
+  assert.equal(canShowAsUnverifiedOpportunity(result), false);
+});
+
+test("general student programs qualify without a direct portal button when no closure is stated", () => {
+  const result = classifyOpportunitySource({ title: "Graduate Trainee Program", url: "https://example.org/careers/graduate-program", text: "Our graduate trainee program offers students a structured start in engineering and business. The program runs every year and applicants can reach out to the recruitment team to discuss placement options. No direct application portal or deadline is listed." });
+  assert.equal(result.category, "specific-opportunity");
+  assert.equal(result.availability, "Verified");
+  assert.equal(result.generalProgram, true);
+  assert.equal(canShowAsActiveOpportunity(result), true);
+});
+
+test("a specific role from a legitimate source stays Verified despite ambiguous availability and no portal link", () => {
+  const result = classifyOpportunitySource({ title: "Engineering Intern", url: "https://example.org/jobs/engineering-intern", text: "The engineering intern will support prototype testing and collaborate with the product team. This position is intended for a currently enrolled engineering student and includes practical laboratory work. Contact details and deadlines are not listed on this page." });
+  assert.equal(result.category, "specific-opportunity");
+  assert.equal(result.availability, "Verified");
+  assert.equal(result.applicationRoute, "none");
+  assert.equal(canShowAsActiveOpportunity(result), true);
 });
 
 test("a named recurring student program with a future application window is Upcoming", () => {

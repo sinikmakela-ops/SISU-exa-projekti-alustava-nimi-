@@ -6,7 +6,10 @@ import {
   extractDeadline,
   extractLocationInfo,
   inferOpportunityRoleMode,
+  isLegitimateOpportunitySource,
   locationConstraintMatch,
+  matchesStudentProfile,
+  opportunityResultsHeadline,
   parseSearchConstraints,
 } from "../lib/matching.ts";
 import { createOutreachDraft, sanitizeBackgroundText } from "../lib/outreach.ts";
@@ -16,6 +19,7 @@ test("query intent selects thesis search without a hard-coded internship filter"
   assert.equal(inferOpportunityRoleMode("Find an engineering internship"), "internship");
   assert.equal(inferOpportunityRoleMode("engineering opportunity"), "both");
   assert.equal(inferOpportunityRoleMode("Find thesis roles", "internship"), "internship");
+  assert.equal(inferOpportunityRoleMode("Etsin kesätyötä Torontosta"), "internship");
 });
 
 test("hard location requests reject unrelated Earth sources and impossible locations", () => {
@@ -57,6 +61,29 @@ test("role classification excludes unrelated senior permanent jobs", () => {
   assert.equal(classifyOpportunity("Senior Director, permanent full-time", "").eligible, false);
   assert.equal(classifyOpportunity("Research Assistant", "University lab role").type, "Research Assistant");
   assert.equal(classifyOpportunity("Master's Thesis Worker", "").type, "Master's Thesis / Diplomityö");
+  assert.equal(classifyOpportunity("Harjoittelija, cybersecurity", "").type, "Internship / Harjoittelu");
+  assert.equal(classifyOpportunity("Kesätyöntekijä, software testing", "").type, "Internship / Harjoittelu");
+  assert.equal(classifyOpportunity("Junior student researcher", "").type, "Student role");
+});
+
+test("source verification distinguishes official, secondary, personal, and scraper sources", () => {
+  assert.equal(isLegitimateOpportunitySource("https://jobs.ashbyhq.com/example/123", "Engineering Intern", "Apply now").legitimate, true);
+  assert.equal(isLegitimateOpportunitySource("https://university.fi/careers/intern", "Student internship", "Applications open").legitimate, true);
+  assert.equal(isLegitimateOpportunitySource("https://www.indeed.com/viewjob?jk=abc", "Engineering Intern", "Apply now").quality, "secondary");
+  assert.equal(isLegitimateOpportunitySource("https://www.linkedin.com/in/example-person", "Student Researcher", "").legitimate, false);
+  assert.equal(isLegitimateOpportunitySource("https://jobrapido.com/example", "Engineering Intern", "Apply now").legitimate, false);
+});
+
+test("a student role matching the requested role type counts as profile fit", () => {
+  assert.equal(matchesStudentProfile("Engineering Intern", "Internship / Harjoittelu", "Student engineering placement", { field: "business", roleMode: "internship" }, "internship"), true);
+  assert.equal(matchesStudentProfile("Engineering Intern", "Internship / Harjoittelu", "Student engineering placement", { field: "business", roleMode: "internship" }, "thesis"), false);
+});
+
+test("result headings distinguish verified, to-confirm, closed, and genuinely empty results", () => {
+  assert.equal(opportunityResultsHeadline(2, 1), "2 verified opportunities found · + 1 roles to confirm");
+  assert.equal(opportunityResultsHeadline(0, 3), "No fully verified openings yet — 3 specific opportunities found (confirm availability)");
+  assert.equal(opportunityResultsHeadline(0, 0, 2), "No open opportunities found — 2 closed or expired");
+  assert.equal(opportunityResultsHeadline(0, 0, 0), "No matching student opportunities found");
 });
 
 test("match scores are calibrated and explain their component values", () => {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { exaRequest, ExaPage, investigateOpportunitySources } from "@/lib/exa";
 import { createOutreachDraft, sanitizeBackgroundText } from "@/lib/outreach";
+import { inferOpportunityRoleMode, isLegitimateOpportunitySource, matchesStudentProfile } from "@/lib/matching";
 import type { ChecklistItem, Profile, PracticalFact, SourceChecklistItem, VerifiedRequirement } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -340,17 +341,18 @@ export async function POST(request: Request) {
     const allEvidence = pages.map((page) => page.excerpt).join(" ");
     const explicitClosed = /\b(position|role|application)s? (?:is |are )?(?:now )?(?:closed|filled)\b|no longer accepting applications|haku päättynyt/i.test(allEvidence);
     const explicitOpen = /\b(accepting applications|applications are open|now accepting applications|apply now)\b|haku on käynnissä|haku on auki/i.test(allEvidence);
-    const recentPublication = pages.some((page) => {
-      const published = page.publishedDate ? Date.parse(page.publishedDate) : NaN;
-      return Number.isFinite(published) && published <= today.getTime() && published >= today.getTime() - 90 * 24 * 60 * 60 * 1000;
-    });
-    const sourceStatus = (facts.deadline && facts.deadline < today.toISOString().slice(0, 10)) || explicitClosed
-      ? "Closed"
-      : explicitOpen
-        ? "Verified open"
-        : recentPublication
-          ? "Possibly open"
-          : "Unknown";
+    const futureOpening = /\b(?:applications?|application window|recruitment|haku) (?:will )?(?:open|opens|start|starts|begin|begins|reopen|reopens)\s+(?:on\s+)?(?:in\s+)?(?:[A-Z][a-z]+\s+)?(?:\d{1,2},?\s+)?(?:20\d{2}|January|February|March|April|May|June|July|August|September|October|November|December|Q[1-4])/i.test(allEvidence);
+    const sourceLegitimacy = isLegitimateOpportunitySource(primary.url, title ?? primary.title ?? "", allEvidence);
+    const studentFit = matchesStudentProfile(title ?? primary.title ?? "", type ?? "Student opportunity", allEvidence, safeProfile, inferOpportunityRoleMode(`${title ?? ""} ${type ?? ""}`, safeProfile.roleMode));
+    const sourceStatus = !sourceLegitimacy.legitimate || !studentFit
+      ? "Unknown"
+      : (facts.deadline && facts.deadline < today.toISOString().slice(0, 10)) || explicitClosed
+        ? "Closed"
+        : explicitOpen
+          ? "Verified open"
+          : futureOpening
+            ? "Possibly open"
+            : "Verified";
     const outreachDraft = createOutreachDraft(safeProfile, {
       title: title ?? "Student opportunity",
       company: company ?? research.organizationDomain,

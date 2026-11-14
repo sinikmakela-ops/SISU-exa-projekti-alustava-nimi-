@@ -6,10 +6,17 @@ export type DeadlineEvidence = { value: string; normalizedDate: string | null; p
 export type MatchScoreBreakdown = { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
 export type OpportunityRoleMode = "internship" | "thesis" | "both";
 
+export function opportunityResultsHeadline(verifiedCount: number, confirmationCount: number, closedCount = 0): string {
+  if (verifiedCount > 0) return `${verifiedCount} verified opportunities found${confirmationCount > 0 ? ` · + ${confirmationCount} roles to confirm` : ""}`;
+  if (confirmationCount > 0) return `No fully verified openings yet — ${confirmationCount} specific opportunities found (confirm availability)`;
+  if (closedCount > 0) return `No open opportunities found — ${closedCount} closed or expired`;
+  return "No matching student opportunities found";
+}
+
 export function inferOpportunityRoleMode(query: string, explicitMode?: OpportunityRoleMode | "auto"): OpportunityRoleMode {
   if (explicitMode && explicitMode !== "auto") return explicitMode;
   const thesis = /\b(thesis|diplomity[oö]|gradu|opinn[aä]ytety[oö]|thesis worker)\b/i.test(query);
-  const internship = /\b(internship|intern|trainee|harjoittel\w*)\b/i.test(query);
+  const internship = /\b(internship|intern|trainee|harjoittel\w*|kesäty\w*|summer student)\b/i.test(query);
   if (thesis && internship) return "both";
   if (thesis) return "thesis";
   if (internship) return "internship";
@@ -127,9 +134,10 @@ export function classifyOpportunity(title: string, text: string): { eligible: bo
   const value = `${title} ${text}`.toLowerCase();
   if (/senior|principal|director|permanent full[- ]time/.test(value) && !/intern|thesis|trainee|research assistant/.test(title.toLowerCase())) return { eligible: false, type: "Unrelated role" };
   if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis|gradutoimeksianto|gradu\b/.test(title.toLowerCase())) return { eligible: true, type: "Master's Thesis / Diplomityö" };
-  if (/intern|harjoittel|trainee/.test(title.toLowerCase())) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/intern|harjoittel|trainee|kesäty[oö]|summer student/.test(title.toLowerCase())) return { eligible: true, type: "Internship / Harjoittelu" };
   if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis (?:position|work|project)|gradutoimeksianto|gradu\b/.test(value)) return { eligible: true, type: "Master's Thesis / Diplomityö" };
-  if (/intern|harjoittel|trainee/.test(value)) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/intern|harjoittel|trainee|kesäty[oö]|summer student/.test(value)) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/\b(student|opiskelija)\b/.test(value) && /\b(assistant|worker|position|role|job|researcher|junior|entry[- ]level)\b/.test(value)) return { eligible: true, type: "Student role" };
   if (/research assistant/.test(value)) return { eligible: true, type: "Research Assistant" };
   return { eligible: false, type: "Unrelated role" };
 }
@@ -140,6 +148,42 @@ export function isAllowedRoleMode(title: string, text: string, mode: Opportunity
   return mode === "thesis" ? type === "Master's Thesis / Diplomityö" : type !== "Master's Thesis / Diplomityö";
 }
 
+const trustedHiringHosts = ["ashbyhq.com", "greenhouse.io", "lever.co", "myworkdayjobs.com", "teamtailor.com", "jobylon.com", "kuntarekry.fi", "valtiolle.fi", "smartrecruiters.com", "recruitee.com", "workable.com"];
+const secondaryHiringHosts = ["linkedin.com", "indeed.com", "glassdoor.com", "academicpositions.com", "euraxess.ec.europa.eu", "jobs.ac.uk", "workopolis.com", "wellfound.com", "eures.europa.eu", "jobbank.gc.ca"];
+const excludedHiringHosts = ["ziprecruiter.com", "jooble.org", "talent.com", "jobrapido.com", "simplyhired.com", "careerjet.com", "monster.com", "jobleads.com", "jobrapido.com", "jobisjob.com", "joblift.com"];
+
+export function isLegitimateOpportunitySource(url: string, title = "", text = ""): { legitimate: boolean; quality: "official" | "secondary" | "untrusted"; reason: string; host: string } {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    if (!/^https?:$/.test(parsed.protocol) || !host || parsed.username || parsed.password) return { legitimate: false, quality: "untrusted", reason: "The source URL is invalid or does not identify a public organization site.", host };
+    if (/linkedin\.com$/i.test(host) && /\/in\//i.test(parsed.pathname)) return { legitimate: false, quality: "untrusted", reason: "This is a personal profile, not a job listing.", host };
+    if (excludedHiringHosts.some((domain) => host === domain || host.endsWith("." + domain))) return { legitimate: false, quality: "untrusted", reason: "This source is an aggregator or scraper mirror that APPLYOS does not trust for opportunity verification.", host };
+    if (trustedHiringHosts.some((domain) => host === domain || host.endsWith("." + domain))) return { legitimate: true, quality: "official", reason: "The source is hosted by a recognized hiring or career platform.", host };
+    if (secondaryHiringHosts.some((domain) => host === domain || host.endsWith("." + domain))) return { legitimate: true, quality: "secondary", reason: "This is a reputable third-party job board or academic opportunity directory. Confirm the role on the employer's host site.", host };
+    if (/\.(?:fi|edu|org|gov|ac\.[a-z]{2,})$/i.test(host)) return { legitimate: true, quality: "official", reason: "The source uses a university, research, government, or organization domain.", host };
+    const organizationToken = host.split(".")[0].replace(/[-_]/g, " ").toLowerCase();
+    const identityText = `${title} ${text}`.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+    const jobPath = /\b(jobs?|careers?|vacancies|openings|positions|internships?|students?|trainees?)\b/i.test(parsed.pathname);
+    const identifiedOrganization = organizationToken.length > 2 && identityText.includes(organizationToken);
+    if (jobPath || identifiedOrganization) return { legitimate: true, quality: "official", reason: "The source appears to be the employer's own domain and opportunity page.", host };
+    return { legitimate: false, quality: "untrusted", reason: "The source could not be confirmed as an employer, university, research institute, or recognized hiring portal.", host };
+  } catch {
+    return { legitimate: false, quality: "untrusted", reason: "The source URL is invalid.", host: "" };
+  }
+}
+
+export function matchesStudentProfile(title: string, type: string, text: string, profile: Partial<Profile>, mode: OpportunityRoleMode): boolean {
+  const roleFit = isStudentOpportunity(title, text) && isAllowedRoleMode(title, text, mode);
+  if (roleFit) return true;
+  const haystack = normalize(`${title} ${type} ${text}`);
+  const fieldTerms = [profile.field, profile.degree, profile.level, profile.interests]
+    .flatMap((value) => (value ?? "").split(/[^\p{L}\p{N}]+/u))
+    .map((term) => normalize(term.trim()))
+    .filter((term) => term.length >= 4);
+  return fieldTerms.some((term) => haystack.includes(term));
+}
+
 export function explainOpportunityMatch(item: Partial<Opportunity>, profile: Partial<Profile>, query = "") {
   const text = `${item.title ?? ""} ${item.summary ?? ""} ${item.source?.excerpt ?? ""}`.toLowerCase();
   const skills = (profile.skills ?? "").split(/[,;\n]/).map((x) => x.trim()).filter((x) => x.length > 2);
@@ -148,7 +192,7 @@ export function explainOpportunityMatch(item: Partial<Opportunity>, profile: Par
   const constraints = parseSearchConstraints(query, profile), locationInfo = extractLocationInfo(`${item.title ?? ""} ${item.source?.excerpt ?? ""}`, item.source?.url);
   const locationMatch = locationConstraintMatch(locationInfo, constraints, text);
   const conflict = constraints.excludeDegree && /(?:bachelor'?s|master'?s|completed)?\s*degree(?:\s+in\s+[^.;,]{2,60})?\s+(?:is\s+)?required|completed degree|must have (?:a )?(?:bachelor'?s|master'?s) degree|degree required/i.test(text) || constraints.excludeTravel && /travel required|must be willing to travel/i.test(text) || constraints.excludeSenior && /senior|principal|director/i.test(item.title ?? "");
-  const breakdown: MatchScoreBreakdown = { base: 40, topicSkill: Math.min(25, topics.length * 4 + matchedSkills.length * 5), studentRole: /thesis|internship|trainee|research assistant/i.test(item.type ?? "") ? 15 : 0, location: locationMatch === "match" && locationInfo.certainty === "verified" ? 10 : 0, openStatus: item.status === "Verified open" ? 5 : 0, missingLocation: locationMatch === "unknown" || locationMatch === "mismatch" ? -10 : 0, missingDeadline: !item.deadline ? -5 : 0, constraintConflict: conflict ? -30 : 0, clampAdjustment: 0 };
+  const breakdown: MatchScoreBreakdown = { base: 40, topicSkill: Math.min(25, topics.length * 4 + matchedSkills.length * 5), studentRole: /thesis|internship|trainee|research assistant/i.test(item.type ?? "") ? 15 : 0, location: locationMatch === "match" && locationInfo.certainty === "verified" ? 10 : 0, openStatus: item.status === "Verified open" || (item as Partial<Opportunity>).availabilityStatus === "Verified" || (item as Partial<Opportunity>).availabilityStatus === "Open" || (item as Partial<Opportunity>).availabilityStatus === "Upcoming" ? 5 : 0, missingLocation: locationMatch === "unknown" || locationMatch === "mismatch" ? -10 : 0, missingDeadline: !item.deadline ? -5 : 0, constraintConflict: conflict ? -30 : 0, clampAdjustment: 0 };
   const rawScore = breakdown.base + breakdown.topicSkill + breakdown.studentRole + breakdown.location + breakdown.openStatus + breakdown.missingLocation + breakdown.missingDeadline + breakdown.constraintConflict;
   const score = Math.max(35, Math.min(92, rawScore));
   breakdown.clampAdjustment = score - rawScore;

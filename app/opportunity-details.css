@@ -85,6 +85,9 @@
 .coverage-card summary{cursor:pointer}
 .filtered-count{margin:7px 0;color:#898593;font-size:8px}
 .classification-reason{margin:7px 0 0 74px;padding:7px 9px;border-left:2px solid #7f6cc7;background:#faf9fd;color:#777281;font-size:8px;line-height:1.5}
+.source-quality-official,.source-quality-secondary{display:inline-flex!important;align-items:center;max-width:260px;white-space:normal;line-height:1.3;border-radius:10px;padding:3px 7px;background:#eef7f2;color:#4e806a;font-size:7px}
+.source-quality-secondary{background:#fff5e8;color:#9a6a30}
+.confirmation-note{margin:7px 0 0 74px;padding:7px 9px;border-left:2px solid #d49c53;background:#fffaf2;color:#88683c;font-size:8px;line-height:1.5}
 .separated-results{margin:16px 0;padding:12px 14px;border:1px solid #e9e6f0;border-radius:9px;background:#fbfaff}
 .separated-results>h3,.separated-results>summary{font:600 11px Manrope,sans-serif;color:#514c61;cursor:pointer}
 .separated-results>p{font-size:9px;color:#83808e;line-height:1.55}

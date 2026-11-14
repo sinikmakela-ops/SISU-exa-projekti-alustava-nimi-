@@ -16,7 +16,7 @@ export type InvestigationData = {
   instructionQuery?: string;
   contactQuery?: string;
   summary: string;
-  status?: "Verified open" | "Possibly open" | "Unknown" | "Closed";
+  status?: "Verified" | "Verified open" | "Possibly open" | "Unknown" | "Closed";
   deadline: string | null;
   deadlineEvidence: FactCitation | null;
   applicationMethod: { type: "email" | "portal" | "other" | "unknown"; details: string | null; sourceUrl: string | null; evidenceExcerpt: string | null };
@@ -35,11 +35,17 @@ export type InvestigationData = {
 };
 
 export type SimilarOpportunity = { title: string; url: string; highlights: string[]; text?: string };
+export type OpportunitySourceQuality = "official" | "secondary";
 
 export type Opportunity = {
   id: string; title: string; company: string; type: string; location: string;
-  summary: string; deadline: string | null; status: "Verified open" | "Possibly open" | "Unknown" | "Closed";
-  availabilityStatus?: "Open" | "Upcoming" | "Closed" | "Unverified";
+  summary: string; deadline: string | null; status: "Verified" | "Verified open" | "Possibly open" | "Unknown" | "Closed";
+  availabilityStatus?: "Open" | "Upcoming" | "Verified" | "Closed" | "Unverified";
+  qualificationStatus?: "Verified";
+  applicationNote?: string;
+  confirmationNote?: string;
+  sourceQuality?: OpportunitySourceQuality;
+  sourceQualityNote?: string;
   classificationReason?: string;
   classificationEvidence?: string;
   match: number; matchReason: string; requirements: string[]; source: { title: string; url: string; excerpt: string };
