@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
-import { classifyOpportunity, explainOpportunityMatch, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
+import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, isAllowedRoleMode, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -10,78 +10,43 @@ type SearchPlan = { query: string; startPublishedDate?: string };
 function queriesFor(query: string, profile: Partial<Profile>, now = new Date()): SearchPlan[] {
   const focus = [profile.field, profile.skills, profile.interests].filter(Boolean).join(" ").slice(0, 180);
   const base = (query + " " + focus).trim();
+  const mode = profile.roleMode ?? "internship";
+  const internshipQuery = base + " (internship OR traineeship OR harjoittelu OR harjoittelupaikka) student opportunity";
+  const thesisQuery = base + " (master's thesis OR bachelor's thesis OR diplomityö OR gradutoimeksianto OR thesis worker) university company";
+  if (mode === "internship") return [
+    { query: internshipQuery, startPublishedDate: publishedWithinDays(90, now) },
+    { query: base + " (internship OR trainee OR research assistant) student role", startPublishedDate: publishedWithinDays(90, now) },
+  ];
+  if (mode === "thesis") return [
+    { query: thesisQuery, startPublishedDate: publishedWithinDays(90, now) },
+    { query: base + " thesis position master's bachelor's diplomityö gradu", startPublishedDate: publishedWithinDays(90, now) },
+  ];
   return [
     {
-      query: base + " (internship OR traineeship OR harjoittelu OR harjoittelupaikka) student opportunity",
+      query: internshipQuery,
       startPublishedDate: publishedWithinDays(90, now),
     },
     {
-      query: base + " (master's thesis OR diplomityö OR gradutoimeksianto OR research assistant) university company",
+      query: thesisQuery + " OR research assistant",
     },
   ];
 }
 
-function parseDateToken(token: string): string | null {
-  const trimmed = token.trim();
-  let year: number, month: number, day: number;
-  const iso = trimmed.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/);
-  if (iso) {
-    year = Number(iso[1]); month = Number(iso[2]); day = Number(iso[3]);
-  } else {
-    const numeric = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
-    if (numeric) {
-      day = Number(numeric[1]); month = Number(numeric[2]); year = Number(numeric[3]);
-      if (year < 100) year += 2000;
-    } else {
-      const parsed = Date.parse(trimmed);
-      if (!Number.isFinite(parsed)) return null;
-      return new Date(parsed).toISOString().slice(0, 10);
-    }
-  }
-  const result = new Date(Date.UTC(year, month - 1, day));
-  if (result.getUTCFullYear() !== year || result.getUTCMonth() !== month - 1 || result.getUTCDate() !== day) return null;
-  return result.toISOString().slice(0, 10);
-}
-
-function extractDeadline(text: string): string | null {
-  const cue = /(application deadline|deadline|apply by|applications? close(?:s)?|submit(?: your application)? by|hakuaika päättyy|viimeistään|hae ennen)/ig;
-  const datePattern = /\b20\d{2}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|\b\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+20\d{2}\b|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+20\d{2}\b/i;
-  let match: RegExpExecArray | null;
-  while ((match = cue.exec(text)) !== null) {
-    const nearby = text.slice(cue.lastIndex, cue.lastIndex + 120);
-    const token = nearby.match(datePattern)?.[0];
-    if (token) {
-      const parsed = parseDateToken(token);
-      if (parsed) return parsed;
-    }
-  }
-  return null;
-}
-
 function determineStatus(text: string, publishedDate?: string, now = new Date()): Opportunity["status"] {
-  const deadline = extractDeadline(text);
-  const today = now.toISOString().slice(0, 10);
-  if ((deadline && deadline < today) || /\b(position|role|application)s? (?:is |are )?(?:now )?(?:closed|filled)\b|no longer accepting applications|haku päättynyt/i.test(text)) {
+  const deadline = parseOpportunityDeadline(text, [], now.toISOString().slice(0, 10));
+  if (deadline?.isPast || /\b(position|role|application)s? (?:is |are )?(?:now )?(?:closed|filled)\b|no longer accepting applications|haku päättynyt/i.test(text)) {
     return "Closed";
   }
   if (/\b(accepting applications|applications are open|applications now open|now accepting applications|apply now|submit your application now)\b|hakuaika on käynnissä|haku on käynnissä|haku on auki|hae nyt/i.test(text)) {
     return "Verified open";
   }
+  if (deadline?.normalizedDate && deadline.normalizedDate >= now.toISOString().slice(0, 10) || deadline && ["cycle", "range", "month"].includes(deadline.precision)) return "Possibly open";
   if (publishedDate) {
     const published = Date.parse(publishedDate);
     const start = Date.parse(publishedWithinDays(90, now));
     if (Number.isFinite(published) && published >= start && published <= now.getTime()) return "Possibly open";
   }
   return "Unknown";
-}
-
-function extractLocation(text: string): string {
-  const places = [
-    "Remote", "Finland", "Sweden", "Denmark", "Norway", "Estonia", "Germany", "Netherlands", "United Kingdom", "Europe",
-    "Helsinki", "Espoo", "Tampere", "Oulu", "Turku", "Jyväskylä", "Vaasa", "Lappeenranta", "Kuopio", "Stockholm", "Berlin",
-  ];
-  const lowered = text.toLowerCase();
-  return places.find((place) => lowered.includes(place.toLowerCase())) ?? "Location not specified";
 }
 
 function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: Date): Opportunity | null {
@@ -95,12 +60,21 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
   const titleParts = title.split(/\s+[–—-]\s+/);
   const sourceText = excerpt.slice(0, 2400);
   const source = { title, url, excerpt: sourceText };
+  const deadlineEvidence = parseOpportunityDeadline(excerpt, raw.highlights ?? [], now.toISOString().slice(0, 10));
+  const exactDeadline = deadlineEvidence?.precision === "day" ? deadlineEvidence.normalizedDate : null;
+  const cycle = extractProgramCycle(excerpt, now.toISOString().slice(0, 10));
+  const academicCycle = extractAcademicCycle(excerpt, now.toISOString().slice(0, 10));
+  const approximateCycle = deadlineEvidence && deadlineEvidence.precision !== "day" ? deadlineEvidence.value : cycle?.value ?? academicCycle?.value ?? null;
+  const reopeningMonth = deadlineEvidence?.precision === "cycle" || (deadlineEvidence?.precision === "month" && /reopens?|opens?/i.test(deadlineEvidence.evidenceExcerpt));
+  const expiredByEvidence = Boolean(deadlineEvidence?.isPast || cycle?.isPast || academicCycle?.isPast);
+  const opportunityStatus = expiredByEvidence ? "Closed" : determineStatus(sourceText, raw.publishedDate, now);
+  const applicationStatus = expiredByEvidence ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadlineEvidence?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : opportunityStatus;
   const provisional: Partial<Opportunity> = {
     title: titleParts[0] || title,
     type: classification.type,
     summary: String(raw.summary ?? sourceText.slice(0, 250)),
-    deadline: parseOpportunityDeadline(excerpt, raw.highlights ?? [], now.toISOString().slice(0, 10))?.normalizedDate ?? extractDeadline(sourceText),
-    status: determineStatus(sourceText, raw.publishedDate, now),
+    deadline: exactDeadline,
+    status: opportunityStatus,
     location: extractLocationInfo(title + " " + excerpt, url).label,
     source,
   };
@@ -113,8 +87,10 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
     type: classification.type,
     location: provisional.location || "Location not specified",
     summary: String(raw.summary ?? sourceText.slice(0, 250) ?? "Source found by Exa."),
-    deadline: provisional.deadline ?? null,
+    deadline: exactDeadline ?? provisional.deadline ?? null,
     status: provisional.status ?? "Unknown",
+    applicationStatus,
+    programCycle: approximateCycle,
     match: match.score,
     matchReason: match.reason,
     matchedSkills: match.matchedSkills,
@@ -196,43 +172,60 @@ export async function POST(request: Request) {
         return true;
       })
       .map((item) => normalize(item, query, body.profile ?? {}, now))
-      .filter((item): item is Opportunity => item !== null);
+      .filter((item): item is Opportunity => item !== null)
+      .filter((item) => isAllowedRoleMode(item.title, item.source.excerpt, body.profile?.roleMode ?? "internship"));
+    const sourceDomains = [...new Set(normalized.flatMap((item) => { try { return [new URL(item.source.url).hostname.replace(/^www\./, "")]; } catch { return []; } }))];
 
     const constraints = parseSearchConstraints(query, body.profile ?? {});
     const constrained = normalized.map((item) => {
       const fullText = `${item.title} ${item.summary} ${item.source.excerpt}`;
       const deadline = parseOpportunityDeadline(fullText, [], now.toISOString().slice(0, 10));
       const cycle = extractProgramCycle(fullText, now.toISOString().slice(0, 10));
-      const deadlineValue = deadline?.normalizedDate ?? item.deadline;
+      const academicCycle = extractAcademicCycle(fullText, now.toISOString().slice(0, 10));
+      const deadlineValue = deadline?.precision === "day" ? deadline.normalizedDate : item.deadline;
       const deadlinePast = deadline?.isPast ?? Boolean(item.deadline && item.deadline < now.toISOString().slice(0, 10));
+      const programCycle = deadline && deadline.precision !== "day" ? deadline.value : item.programCycle ?? cycle?.value ?? academicCycle?.value ?? null;
+      const reopeningMonth = deadline?.precision === "cycle" || (deadline?.precision === "month" && /reopens?|opens?/i.test(deadline.evidenceExcerpt));
       const locationInfo = extractLocationInfo(`${item.title} ${fullText}`, item.source.url);
       const placeMatch = locationConstraintMatch(locationInfo, constraints, `${fullText} ${item.source.url}`);
       const degreeConflict = constraints.excludeDegree && /(?:bachelor'?s|master'?s|completed)?\s*degree(?:\s+in\s+[^.;,]{2,60})?\s+(?:is\s+)?required|completed degree|must have (?:a )?(?:bachelor'?s|master'?s) degree|degree required/i.test(fullText);
       const travelConflict = constraints.excludeTravel && /travel required|must be willing to travel/i.test(fullText);
       const mismatch = placeMatch === "mismatch" ? [`Requested location (${constraints.locations.join(", ")}) is not supported by this source`] : [];
       const conflict = degreeConflict || travelConflict;
-      const closed = Boolean(deadlinePast || cycle?.isPast || item.status === "Closed");
-      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, applicationStatus: closed ? "Closed" as const : item.status, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : null, programCycle: cycle?.value ?? null, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
+      const closed = Boolean(deadlinePast || cycle?.isPast || academicCycle?.isPast || item.status === "Closed");
+      const applicationStatus = closed ? "Closed" : reopeningMonth ? `Upcoming / Reopens ${deadline?.value.replace(/\s*\(month only.*$/i, "")}` : cycle && !cycle.isPast ? `Upcoming / ${cycle.value}` : academicCycle && !academicCycle.isPast ? `Upcoming / ${academicCycle.value}` : item.applicationStatus ?? item.status;
+      return { ...item, deadline: deadlineValue, status: closed ? "Closed" as const : item.status, applicationStatus, closedEvidence: deadlinePast ? `${deadline?.value ?? item.deadline}${deadline?.evidenceExcerpt ? ` — ${deadline.evidenceExcerpt}` : ""}` : cycle?.isPast ? cycle.value : academicCycle?.isPast ? academicCycle.value : null, programCycle, location: locationInfo.label, locationLabel: locationInfo.label, locationSnippet: locationInfo.snippet, locationMatch: placeMatch, eligibilityStatus: degreeConflict ? "Conflict: requires completed degree" : travelConflict ? "Conflict: requires travel" : "No detected conflict", constraintMismatches: mismatch, _constraintConflict: conflict };
     });
     const eligible = constrained.filter((item) => locationConstraintMatch(extractLocationInfo(`${item.title} ${item.source.excerpt}`, item.source.url), constraints, `${item.title} ${item.source.excerpt} ${item.source.url}`) !== "mismatch" && !item._constraintConflict);
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
       return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
-    }).sort((a, b) => b.match - a.match);
-    const closedResults = ranked.filter((item) => item.applicationStatus === "Closed");
-    const active = ranked.filter((item) => item.applicationStatus !== "Closed");
+    });
+    const filteredOutExpired = ranked.filter((item) => item.applicationStatus === "Closed").length;
+    const active = ranked.filter((item) => item.applicationStatus !== "Closed").sort((a, b) => {
+      const priority = (item: Opportunity) => {
+        const published = item.publishedDate ? Date.parse(item.publishedDate) : NaN;
+        const fresh = Number.isFinite(published) && published <= now.getTime() ? Math.max(0, 8 - Math.floor((now.getTime() - published) / (15 * 24 * 60 * 60 * 1000))) : 0;
+        const open = item.status === "Verified open" ? 12 : item.applicationStatus?.startsWith("Upcoming") ? 10 : item.status === "Possibly open" ? 5 : 0;
+        const cycle = /2026|2027/.test(item.programCycle ?? "") ? 5 : 0;
+        return item.match + fresh + open + cycle;
+      };
+      return priority(b) - priority(a);
+    });
 
     return NextResponse.json({
       opportunities: active.slice(0, 12),
-      closedResults: closedResults.slice(0, 12),
       constraintSummary: eligible.length === 0 && (constraints.locations.length > 0 || constrained.some((item) => item._constraintConflict)) ? `0 live opportunities matched the hard constraints. ${constrained.filter((item) => locationConstraintMatch(extractLocationInfo(item.source.excerpt, item.source.url), constraints, `${item.source.excerpt} ${item.source.url}`) === "mismatch").length ? `No source verified the requested location (${constraints.locations.join(", ")}).` : "All returned sources conflicted with the degree or eligibility exclusions."}` : null,
-      constraintExplanation: !active.length && constraints.locations.length ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
+      constraintExplanation: !active.length && constraints.locations.length && eligible.length === 0 ? `No live source matched the requested location: ${constraints.locations.join(", ")}.` : null,
       activity: {
         queries: plan.map((item) => item.query),
         freshnessStart: plan.find((item) => item.startPublishedDate)?.startPublishedDate ?? null,
         sources: seen.size,
-        returned: ranked.length,
+        sourceDomains,
+        roleMode: body.profile?.roleMode ?? "internship",
+        returned: active.length,
+        filteredOutExpired,
         researchedAt: now.toISOString(),
         failedQueries,
         usedOpenAI: Boolean(process.env.OPENAI_API_KEY),

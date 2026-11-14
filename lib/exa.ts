@@ -14,8 +14,10 @@ export type ExaPage = {
 export type OpportunityResearchSources = {
   organizationDomain: string;
   instructionQuery: string;
+  contactQuery: string;
   primaryPages: ExaPage[];
   instructionResults: ExaPage[];
+  contactResults: ExaPage[];
   failures: string[];
 };
 
@@ -65,11 +67,18 @@ export async function investigateOpportunitySources(primaryUrl: string): Promise
   const organizationDomain = parsed.hostname.replace(/^www\./i, "");
   if (!organizationDomain) throw new Error("The selected source URL has no organization domain.");
   const instructionQuery = "site:" + organizationDomain + " (application OR deadline OR thesis OR harjoittelu OR contact)";
+  const contactQuery = `site:${organizationDomain} (supervisor OR recruiter OR "talent acquisition" OR "head of" OR "R&D" OR contact OR email)`;
 
-  const [primary, instructions] = await Promise.allSettled([
+  const [primary, instructions, contacts] = await Promise.allSettled([
     exaRequest<{ results?: ExaPage[] }>("/contents", { urls: [primaryUrl], ...CONTENT_OPTIONS }),
     exaRequest<{ results?: ExaPage[] }>("/search", {
       query: instructionQuery,
+      type: "auto",
+      numResults: 5,
+      contents: CONTENT_OPTIONS,
+    }),
+    exaRequest<{ results?: ExaPage[] }>("/search", {
+      query: contactQuery,
       type: "auto",
       numResults: 5,
       contents: CONTENT_OPTIONS,
@@ -78,12 +87,14 @@ export async function investigateOpportunitySources(primaryUrl: string): Promise
 
   const primaryPages = primary.status === "fulfilled" ? primary.value.results ?? [] : [];
   const instructionResults = instructions.status === "fulfilled" ? instructions.value.results ?? [] : [];
+  const contactResults = contacts.status === "fulfilled" ? contacts.value.results ?? [] : [];
   const failures = [
     ...(primary.status === "rejected" ? ["Primary page: " + errorMessage(primary.reason)] : []),
     ...(instructions.status === "rejected" ? ["Application-instructions search: " + errorMessage(instructions.reason)] : []),
+    ...(contacts.status === "rejected" ? ["Contact discovery search: " + errorMessage(contacts.reason)] : []),
   ];
 
-  return { organizationDomain, instructionQuery, primaryPages, instructionResults, failures };
+  return { organizationDomain, instructionQuery, contactQuery, primaryPages, instructionResults, contactResults, failures };
 }
 
 function errorMessage(error: unknown): string {

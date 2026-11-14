@@ -2,10 +2,11 @@ import type { Opportunity, Profile } from "@/lib/types";
 
 export type SearchConstraints = { locations: string[]; excludeDegree: boolean; excludeTravel: boolean; excludeSenior: boolean };
 export type LocationInfo = { canonical: string | null; certainty: "verified" | "inferred" | "unknown"; snippet: string | null; label: string };
-export type DeadlineEvidence = { value: string; normalizedDate: string; precision: "day" | "month"; evidenceExcerpt: string; isPast: boolean };
+export type DeadlineEvidence = { value: string; normalizedDate: string | null; precision: "day" | "month" | "range" | "cycle"; evidenceExcerpt: string; isPast: boolean };
 export type MatchScoreBreakdown = { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
+export type OpportunityRoleMode = "internship" | "thesis" | "both";
 
-const places: Record<string, string[]> = { Finland: ["finland", "suomi"], Tampere: ["tampere"], Helsinki: ["helsinki"], Espoo: ["espoo"], Oulu: ["oulu"], Turku: ["turku"], Jyväskylä: ["jyväskylä", "jyvaskyla"], Vaasa: ["vaasa"], Lappeenranta: ["lappeenranta"], Kuopio: ["kuopio"], Canada: ["canada"], Toronto: ["toronto"], Vancouver: ["vancouver"], Sweden: ["sweden", "ruotsi"], Germany: ["germany", "deutschland"], Europe: ["europe", "eurooppa"], Remote: ["remote", "remotely", "etätyö"], Mars: ["mars"], Moon: ["moon", "lunar"], "Space station": ["space station", "iss"], Atlantis: ["atlantis"] };
+const places: Record<string, string[]> = { Gothenburg: ["gothenburg", "göteborg"], Nairobi: ["nairobi"], Stockholm: ["stockholm"], Tampere: ["tampere"], Helsinki: ["helsinki"], Espoo: ["espoo"], Oulu: ["oulu"], Turku: ["turku"], Jyväskylä: ["jyväskylä", "jyvaskyla"], Vaasa: ["vaasa"], Lappeenranta: ["lappeenranta"], Kuopio: ["kuopio"], Toronto: ["toronto"], Vancouver: ["vancouver"], Finland: ["finland", "suomi"], Canada: ["canada"], Sweden: ["sweden", "swedish", "ruotsi", "svenska"], Germany: ["germany", "deutschland"], Europe: ["europe", "eurooppa"], Remote: ["remote", "remotely", "etätyö"], Mars: ["mars"], Moon: ["moon", "lunar"], "Space station": ["space station", "iss"], Atlantis: ["atlantis"] };
 const today = () => new Date().toISOString().slice(0, 10);
 const normalize = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
@@ -23,27 +24,26 @@ export function parseSearchConstraints(query: string, profile: Partial<Profile> 
 
 export function extractLocationInfo(text: string, url = ""): LocationInfo {
   const n = normalize(text);
-  for (const [name, aliases] of Object.entries(places)) {
-    if (["Mars", "Moon", "Space station", "Atlantis"].includes(name)) continue;
-    const alias = aliases.find((x) => new RegExp(`\\b${x}\\b`, "i").test(n));
-    if (alias) { const i = n.indexOf(alias); return { canonical: name, certainty: "verified", snippet: text.slice(Math.max(0, i - 35), Math.min(text.length, i + alias.length + 50)).trim(), label: `Location: ${name} (verified in source)` }; }
-  }
+  const cities = new Set(["Gothenburg", "Nairobi", "Stockholm", "Tampere", "Helsinki", "Espoo", "Oulu", "Turku", "Jyväskylä", "Vaasa", "Lappeenranta", "Kuopio", "Toronto", "Vancouver"]);
+  const explicit = Object.entries(places).flatMap(([name, aliases]) => ["Mars", "Moon", "Space station", "Atlantis"].includes(name) ? [] : aliases.flatMap((alias) => { const i = n.search(new RegExp(`\\b${normalize(alias)}\\b`, "i")); return i < 0 ? [] : [{ name, alias, index: i, priority: name === "Remote" ? 2 : cities.has(name) ? 0 : name === "Europe" ? 3 : 1 }]; })).sort((a, b) => a.priority - b.priority || a.index - b.index);
+  if (explicit.length) { const { name, alias, index } = explicit[0]; return { canonical: name, certainty: "verified", snippet: text.slice(Math.max(0, index - 35), Math.min(text.length, index + alias.length + 70)).trim(), label: `Location: ${name} (verified in source)` }; }
   try { const host = new URL(url).hostname.toLowerCase(); if (host.endsWith(".fi")) return { canonical: "Finland", certainty: "inferred", snippet: host, label: "Likely Finland (from domain; confirm on source)" }; if (host.endsWith(".ca")) return { canonical: "Canada", certainty: "inferred", snippet: host, label: "Likely Canada (from domain; confirm on source)" }; } catch { /* invalid source URL */ }
   return { canonical: null, certainty: "unknown", snippet: null, label: "Location not stated in excerpt" };
 }
 
 export function locationConstraintMatch(info: LocationInfo, constraints: SearchConstraints, evidenceText = ""): "match" | "mismatch" | "unknown" {
   if (!constraints.locations.length) return "unknown";
-  const evidence = normalize(`${evidenceText} ${info.snippet ?? ""}`);
-  for (const requested of constraints.locations) {
-    const aliases = places[requested] ?? [normalize(requested)];
-    if (aliases.some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(evidence))) return "match";
+  const evidence = normalize(info.snippet ?? "");
+  for (const requested of constraints.locations) { const aliases = places[requested] ?? [normalize(requested)]; if (aliases.some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(evidence))) return "match"; }
+  if (!info.canonical) {
+    const allEvidence = normalize(evidenceText);
+    if (constraints.locations.some((requested) => (places[requested] ?? [normalize(requested)]).some((alias) => new RegExp(`\\b${normalize(alias)}\\b`, "i").test(allEvidence)))) return "match";
+    return "mismatch";
   }
-  if (!info.canonical) return "mismatch";
   if (constraints.locations.includes(info.canonical)) return "match";
-  if (constraints.locations.includes("Europe") && ["Finland", "Sweden", "Germany", "Canada"].includes(info.canonical)) return "match";
-  if (constraints.locations.includes("Finland") && ["Tampere", "Helsinki", "Espoo", "Oulu", "Turku", "Jyväskylä", "Vaasa", "Lappeenranta", "Kuopio"].includes(info.canonical)) return "match";
-  if (constraints.locations.includes("Canada") && ["Toronto", "Vancouver"].includes(info.canonical)) return "match";
+  const countryByCity: Record<string, string> = { Gothenburg: "Sweden", Stockholm: "Sweden", Tampere: "Finland", Helsinki: "Finland", Espoo: "Finland", Oulu: "Finland", Turku: "Finland", "Jyväskylä": "Finland", Vaasa: "Finland", Lappeenranta: "Finland", Kuopio: "Finland", Toronto: "Canada", Vancouver: "Canada" };
+  if (constraints.locations.includes(countryByCity[info.canonical] ?? "")) return "match";
+  if (constraints.locations.includes("Europe") && ["Finland", "Sweden", "Germany"].includes(countryByCity[info.canonical] ?? info.canonical)) return "match";
   return "mismatch";
 }
 
@@ -58,7 +58,7 @@ export function extractDeadlineEvidence(text: string, referenceDate = today()): 
     const n = token.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/), fi = token.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
     if (n) iso = `${n[1]}-${n[2].padStart(2,"0")}-${n[3].padStart(2,"0")}`;
     else if (fi) iso = `${fi[3].length===2?"20":""}${fi[3]}-${fi[2].padStart(2,"0")}-${fi[1].padStart(2,"0")}`;
-    else { const d = Date.parse(token); if (Number.isFinite(d)) iso = new Date(d).toISOString().slice(0,10); else { const ym=token.match(/(20\d{2})/); const mi=token.match(new RegExp(monthNames,"i"))?.[0]; const months=["january","february","march","april","may","june","july","august","september","october","november","december","jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec","tammikuuta","helmikuuta","maaliskuuta","huhtikuuta","toukokuuta","kesäkuuta","heinäkuuta","elokuuta","syyskuuta","lokakuuta","marraskuuta","joulukuuta"].indexOf(normalize(mi??"")); if(ym&&months>=0){ iso=`${ym[1]}-${String((months%12)+1).padStart(2,"0")}`; precision="month"; } } }
+    else { const yearMonth=token.match(/^([a-zäö]+)\s+(20\d{2})$/i); const d = yearMonth ? NaN : Date.parse(token); if (Number.isFinite(d)) iso = new Date(d).toISOString().slice(0,10); else { const ym=token.match(/(20\d{2})/); const mi=token.match(new RegExp(monthNames,"i"))?.[0]; const months=["january","february","march","april","may","june","july","august","september","october","november","december","jan","feb","mar","apr","jun","jul","aug","sep","sept","oct","nov","dec","tammikuuta","helmikuuta","maaliskuuta","huhtikuuta","toukokuuta","kesäkuuta","heinäkuuta","elokuuta","syyskuuta","lokakuuta","marraskuuta","joulukuuta"].indexOf(normalize(mi??"")); if(ym&&months>=0){ iso=`${ym[1]}-${String((months%12)+1).padStart(2,"0")}`; precision="month"; } } }
     if (iso) return { value: token, normalizedDate: iso, precision, evidenceExcerpt: text.slice(Math.max(0,start-70),Math.min(text.length,start+Math.max(160,window.indexOf(token)+token.length+30))).trim(), isPast: iso < (precision === "month" ? referenceDate.slice(0,7) : referenceDate) };
   }
   return null;
@@ -66,16 +66,34 @@ export function extractDeadlineEvidence(text: string, referenceDate = today()): 
 
 export function extractDeadline(text: string, highlights: string[] = [], referenceDate = today()): DeadlineEvidence | null {
   const sources = [...highlights, text].filter(Boolean);
-  const cue = /deadline|apply by|application|closing|close|haku|hae ennen|viimeistään|päättyy|hakuaika|application period/ig;
+  const cue = /deadline|apply by|application|closing|close|haku|hae ennen|viimeistään|päättyy|hakuaika|application period|reopens?|opens?/ig;
   const date = /\b(?:20\d{2}-\d{1,2}-\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2})\b/gi;
+  const monthNames = "January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec";
+  const range = new RegExp(`\\b(${monthNames})\\s+\\d{1,2}\\s*[–—-]\\s*(?:(${monthNames})\\s*)?(\\d{1,2})(?:,?\\s*(20\\d{2}))?\\b`, "i");
+  const numericRange = /\b\d{1,2}\.?\s*[–—-]\s*(\d{1,2})\.(\d{1,2})\.(20\d{2})\b/i;
+  const monthOnly = new RegExp(`\\b(?:reopens?|opens?)\\s+(?:again\\s+)?(?:in\\s+)?(${monthNames})(?:\\s+(20\\d{2}))?\\b`, "i");
+  const fromRange = (source: string, excerpt: string): DeadlineEvidence | null => {
+    const numeric = excerpt.match(numericRange);
+    if (numeric) { const token = `${numeric[1]}.${numeric[2]}.${numeric[3]}`; const evidence = extractDeadlineEvidence(`Deadline ${token}`, referenceDate); return evidence ? { ...evidence, value: token, evidenceExcerpt: excerpt.trim() } : null; }
+    const match = excerpt.match(range);
+    if (!match) return null;
+    const endMonth = match[2] ?? match[1], endDay = match[3], year = match[4];
+    if (!year) return { value: `${endMonth} ${endDay} (year not stated)`, normalizedDate: null, precision: "range", evidenceExcerpt: excerpt.trim(), isPast: false };
+    const token = `${endMonth} ${endDay}, ${year}`, evidence = extractDeadlineEvidence(`Deadline ${token}`, referenceDate);
+    return evidence ? { ...evidence, value: token, evidenceExcerpt: excerpt.trim() } : null;
+  };
   for (const source of sources) {
+    const reopen = source.match(monthOnly);
+    if (reopen) { const year = reopen[2] ? ` ${reopen[2]}` : ""; const label = `${reopen[1][0].toUpperCase()}${reopen[1].slice(1)}${year} (month only — exact day not stated)`; return { value: label, normalizedDate: null, precision: "cycle", evidenceExcerpt: source.slice(Math.max(0, (reopen.index ?? 0) - 40), (reopen.index ?? 0) + reopen[0].length + 40).trim(), isPast: false }; }
     for (const match of source.matchAll(cue)) {
       const start = match.index ?? 0, snippet = source.slice(start, start + 240), found = snippet.match(date)?.[0];
+      const ranged = fromRange(source, snippet); if (ranged) return ranged;
       date.lastIndex = 0;
       if (found) { const result = extractDeadlineEvidence(`${snippet.slice(0, snippet.indexOf(found))}${found}`, referenceDate); if (result) return { ...result, evidenceExcerpt: snippet.slice(0, Math.max(120, snippet.indexOf(found) + found.length)).trim() }; }
     }
   }
   for (const source of sources) {
+    const ranged = fromRange(source, source); if (ranged) return ranged;
     const found = source.match(date)?.[0]; date.lastIndex = 0;
     if (found) { const result = extractDeadlineEvidence(`Application date: ${found}`, referenceDate); if (result) return { ...result, evidenceExcerpt: source.slice(Math.max(0, source.indexOf(found) - 80), source.indexOf(found) + found.length + 80).trim() }; }
   }
@@ -88,15 +106,29 @@ export function extractProgramCycle(text: string, referenceDate = today()): { va
   return { value: m[0], isPast: year < currentYear || (year === currentYear && /summer|spring|kesä|kevät/i.test(season) && referenceDate.slice(5,7) >= "09") };
 }
 
+export function extractAcademicCycle(text: string, referenceDate = today()): { value: string; isPast: boolean } | null {
+  const match = text.match(/\b(20\d{2})\s*[–—/-]\s*(20\d{2}|\d{2})(?:\s+(?:academic year|academic cycle|intake|cohort))?\b/i);
+  if (!match) return null;
+  const startYear = Number(match[1]), endYear = match[2].length === 2 ? Math.floor(startYear / 100) * 100 + Number(match[2]) : Number(match[2]);
+  return { value: match[0].trim(), isPast: endYear < Number(referenceDate.slice(0, 4)) };
+}
+
 export function classifyOpportunity(title: string, text: string): { eligible: boolean; type: string } {
   const value = `${title} ${text}`.toLowerCase();
   if (/senior|principal|director|permanent full[- ]time/.test(value) && !/intern|thesis|trainee|research assistant/.test(title.toLowerCase())) return { eligible: false, type: "Unrelated role" };
-  if (/master'?s thesis|diplomity|thesis|gradutoimeksianto/.test(value)) return { eligible: true, type: "Master's Thesis / Diplomityö" };
+  if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis|gradutoimeksianto|gradu\b/.test(title.toLowerCase())) return { eligible: true, type: "Master's Thesis / Diplomityö" };
+  if (/intern|harjoittel|trainee/.test(title.toLowerCase())) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis (?:position|work|project)|gradutoimeksianto|gradu\b/.test(value)) return { eligible: true, type: "Master's Thesis / Diplomityö" };
   if (/intern|harjoittel|trainee/.test(value)) return { eligible: true, type: "Internship / Harjoittelu" };
   if (/research assistant/.test(value)) return { eligible: true, type: "Research Assistant" };
   return { eligible: false, type: "Unrelated role" };
 }
 export function isStudentOpportunity(title: string, text: string) { return classifyOpportunity(title, text).eligible; }
+export function isAllowedRoleMode(title: string, text: string, mode: OpportunityRoleMode = "internship") {
+  if (mode === "both") return true;
+  const type = classifyOpportunity(title, text).type;
+  return mode === "thesis" ? type === "Master's Thesis / Diplomityö" : type !== "Master's Thesis / Diplomityö";
+}
 
 export function explainOpportunityMatch(item: Partial<Opportunity>, profile: Partial<Profile>, query = "") {
   const text = `${item.title ?? ""} ${item.summary ?? ""} ${item.source?.excerpt ?? ""}`.toLowerCase();

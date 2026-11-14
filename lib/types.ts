@@ -2,22 +2,28 @@ export type Profile = {
   name: string; degree: string; field: string; university: string; level: string;
   graduation: string; skills: string; interests: string; locations: string;
   preference: string; languages: string; experience: string; cvText: string;
+  roleMode?: "internship" | "thesis" | "both";
+  availability?: string;
 };
 
 export type ResearchSource = { title: string; url: string; publishedDate?: string | null; excerpt: string };
 export type FactCitation = { sourceUrl: string; evidenceExcerpt: string };
+export type PracticalFact = { category: "location" | "travel" | "duration" | "startWindow" | "compensation" | "workMode" | "requiredDocument" | "eligibility"; label: string; value: string; sourceUrl: string; evidenceExcerpt: string };
 export type InvestigationData = {
   source?: { title?: string; url: string; excerpt: string };
   sources: ResearchSource[];
   organizationDomain?: string;
   instructionQuery?: string;
+  contactQuery?: string;
   summary: string;
   status?: "Verified open" | "Possibly open" | "Unknown" | "Closed";
   deadline: string | null;
   deadlineEvidence: FactCitation | null;
   applicationMethod: { type: "email" | "portal" | "other" | "unknown"; details: string | null; sourceUrl: string | null; evidenceExcerpt: string | null };
-  contactPerson: { name: string; role: string | null; sourceUrl: string; evidenceExcerpt: string } | null;
+  contactPerson: { name: string; role: string | null; sourceUrl: string; evidenceExcerpt: string; email?: string | null } | null;
   applicationSteps: Array<{ order: number; step: string; sourceUrl: string; evidenceExcerpt: string }>;
+  practicalFacts?: PracticalFact[];
+  outreachDraft?: string;
   verifiedRequirements: VerifiedRequirement[];
   sourceChecklist: SourceChecklistItem[];
   checklist: ChecklistItem[];
@@ -40,13 +46,14 @@ export type Opportunity = {
   matchedTopics?: string[];
   scoreBreakdown?: { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
   eligibilityStatus?: string;
-  applicationStatus?: "Verified open" | "Possibly open" | "Unknown" | "Closed";
+  applicationStatus?: string;
   closedEvidence?: string | null;
   programCycle?: string | null;
   constraintMismatches?: string[];
   missingInfo?: string[];
   manualDocuments?: string[];
   investigation?: InvestigationData;
+  outreachDraft?: string;
   publishedDate?: string; saved?: boolean; stage?: string; checklist?: ChecklistItem[];
 };
 

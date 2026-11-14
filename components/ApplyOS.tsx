@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChecklistItem, InvestigationData, Opportunity, Profile, SimilarOpportunity } from "@/lib/types";
+import type { ChecklistItem, InvestigationData, Opportunity, Profile, PracticalFact, SimilarOpportunity } from "@/lib/types";
 
 const scenarios = [
   ["Suomi · Tampere · tuotantotalous", "Opiskelen tuotantotaloutta Tampereen yliopistossa. Etsi minulle sopivia palkallisia harjoittelu- ja diplomityöpaikkoja."],
@@ -9,7 +9,7 @@ const scenarios = [
   ["Sustainability · business thesis", "I'm a business master's student interested in sustainability. Find thesis opportunities in Finland."],
   ["Mechanical engineering · Europe", "I'm studying mechanical engineering and looking for an internship in Europe."]
 ];
-const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", cvText: "" };
+const empty: Profile = { name: "Sini", degree: "", field: "", university: "", level: "Master's student", graduation: "", skills: "", interests: "", locations: "Finland", preference: "Hybrid or remote", languages: "Finnish, English", experience: "", cvText: "", roleMode: "internship", availability: "" };
 const manualDocumentOptions = ["CV", "Academic Transcript / Opintosuoritusote", "Portfolio / GitHub", "Motivation Letter"];
 const checklistDefaults: ChecklistItem[] = [
   { id: "cv", label: "CV", status: "Needs review" }, { id: "transcript", label: "Academic transcript", status: "Needs confirmation" },
@@ -26,16 +26,23 @@ function safeHttpsUrl(value?: string | null, fallback?: string | null): string |
   }
   return null;
 }
+function buildOutreachDraft(profile: Profile, item: Opportunity, investigation?: InvestigationData): string {
+  const contact = investigation?.contactPerson?.name && investigation.contactPerson.name !== "Publicly listed contact" ? investigation.contactPerson.name : "Hiring team";
+  const skills = profile.skills.split(/[,;\n]/).map((value) => value.trim()).filter(Boolean).slice(0, 4);
+  const cvHighlight = (profile.cvText.split(/(?<=[.!?])\s+/).find((sentence) => skills.some((skill) => sentence.toLowerCase().includes(skill.toLowerCase()))) ?? profile.cvText.trim())?.slice(0, 220);
+  const terms = (investigation?.practicalFacts ?? []).filter((fact) => ["location", "duration", "startWindow", "compensation", "workMode"].includes(fact.category)).slice(0, 2);
+  const factLine = terms.length ? `I noticed this detail in the announcement: “${terms[0].evidenceExcerpt.slice(0, 200)}”` : "I have reviewed the opportunity announcement and would be glad to learn more about the role.";
+  const availability = profile.availability || (profile.graduation ? `Expected graduation: ${profile.graduation}` : "Availability: to be discussed");
+  return `Subject: Interest in ${item.title}\n\nDear ${contact},\n\nMy name is ${profile.name || "[Your name]"}, and I am ${profile.level.toLowerCase()}${profile.field ? ` studying ${profile.field}` : ""}${profile.university ? ` at ${profile.university}` : ""}. I am interested in the ${item.title} opportunity at ${item.company}.\n\n${skills.length ? `My relevant skills include ${skills.join(", ")}.` : profile.experience ? profile.experience.slice(0, 240) : "I would be happy to share more about my relevant experience."}${cvHighlight ? ` A relevant CV highlight is: ${cvHighlight}` : ""}\n\n${factLine} ${availability}.\n\nCould you please let me know the best next step to apply or discuss fit?\n\nKind regards,\n${profile.name || "[Your name]"}`;
+}
 
 export default function ApplyOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
   const [results, setResults] = useState<Opportunity[]>([]);
-  const [closedResults, setClosedResults] = useState<Opportunity[]>([]);
-  const [showClosed, setShowClosed] = useState(false);
   const [constraintExplanation, setConstraintExplanation] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [activity, setActivity] = useState<{ queries: string[]; sources: number; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }> } | null>(null);
+  const [activity, setActivity] = useState<{ queries: string[]; sources: number; sourceDomains?: string[]; roleMode?: string; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }>; filteredOutExpired?: number; returned?: number } | null>(null);
   const [screen, setScreen] = useState<"discover" | "profile" | "apps">("discover");
   const [selected, setSelected] = useState<Opportunity | null>(null);
   const [busy, setBusy] = useState(false);
@@ -43,6 +50,7 @@ export default function ApplyOS() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [summary, setSummary] = useState("");
+  const [draftMessage, setDraftMessage] = useState("");
   const [cvName, setCvName] = useState("");
   const [navOpen, setNavOpen] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -63,15 +71,16 @@ export default function ApplyOS() {
 
   const saved = useMemo(() => new Set(apps.map((x) => x.id)), [apps]);
 
-  async function search(value: string) {
+  async function search(value: string, roleModeOverride?: Profile["roleMode"]) {
     const q = value.trim();
     if (!q || busy) return;
-    setQuery(q); setError(""); setBusy(true); setResults([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
+    setQuery(q); setError(""); setConstraintExplanation(null); setBusy(true); setResults([]); setActivity(null); setHasSearched(true); setScreen("discover"); setSelected(null);
     try {
-      const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile }) });
+      const searchProfile = roleModeOverride ? { ...profile, roleMode: roleModeOverride } : profile;
+      const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile: searchProfile }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not search right now.");
-      setResults(data.opportunities || []); setClosedResults(data.closedResults || []); setShowClosed(false); setConstraintExplanation(data.constraintSummary || data.constraintExplanation || null); setActivity(data.activity || null);
+      setResults(data.opportunities || []); setConstraintExplanation(data.constraintSummary || data.constraintExplanation || null); setActivity(data.activity || null);
     } catch (e) { setError(e instanceof Error ? e.message : "Search failed."); }
     finally { setBusy(false); }
   }
@@ -79,14 +88,16 @@ export default function ApplyOS() {
   async function investigate(item: Opportunity) {
     setResearching(true); setError("");
     try {
-      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, profile: { skills: profile.skills, cvText: profile.cvText, documents: item.manualDocuments ?? [] } }) });
+      const res = await fetch("/api/investigate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: item.source.url, title: item.title, profile: { ...profile, documents: item.manualDocuments ?? [] } }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Research failed.");
-      const investigation = data as InvestigationData;
+      const generatedDraft = data.outreachDraft || buildOutreachDraft(profile, item, data as InvestigationData);
+      const investigation = { ...data, outreachDraft: generatedDraft } as InvestigationData;
       const checklist = (data.checklist || []).map((x: { label: string; status: ChecklistItem["status"] }, i: number) => ({ ...x, id: item.id + "-" + i }));
       setSummary(data.summary || "");
-      setSelected((current) => current ? { ...current, checklist, investigation } : current);
-      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, investigation } : x));
+      setDraftMessage(generatedDraft);
+      setSelected((current) => current ? { ...current, checklist, investigation, outreachDraft: generatedDraft } : current);
+      setApps((current) => current.map((x) => x.id === item.id ? { ...x, checklist, investigation, outreachDraft: generatedDraft } : x));
     } catch (e) { setError(e instanceof Error ? e.message : "Research failed."); }
     finally { setResearching(false); }
   }
@@ -110,6 +121,15 @@ export default function ApplyOS() {
     }
   }
 
+  function openOpportunity(item: Opportunity) {
+    setSelected(item); setSummary(""); setDraftMessage(item.outreachDraft ?? item.investigation?.outreachDraft ?? (item.investigation ? buildOutreachDraft(profile, item, item.investigation) : ""));
+  }
+  function resetDraft() { if (selected) updateDraft(buildOutreachDraft(profile, selected, selected.investigation)); }
+  async function copyDraft() {
+    try { await navigator.clipboard.writeText(draftMessage); setMessage("Draft copied to clipboard"); }
+    catch { setError("Clipboard access is unavailable. Select and copy the draft text manually."); }
+  }
+
   function toggleSave(item: Opportunity) {
     if (saved.has(item.id)) { setApps((current) => current.filter((x) => x.id !== item.id)); setMessage("Removed from your applications"); }
     else { setApps((current) => [{ ...item, stage: "Discovered", checklist: item.checklist || checklistDefaults }, ...current]); setMessage("Saved to My applications"); }
@@ -129,6 +149,12 @@ export default function ApplyOS() {
     };
     setApps((current) => current.map(update));
     setSelected((current) => current ? update(current) : current);
+  }
+
+  function updateDraft(value: string) {
+    setDraftMessage(value);
+    setSelected((current) => current ? { ...current, outreachDraft: value, investigation: current.investigation ? { ...current.investigation, outreachDraft: value } : current.investigation } : current);
+    setApps((current) => current.map((item) => selected && item.id === selected.id ? { ...item, outreachDraft: value, investigation: item.investigation ? { ...item.investigation, outreachDraft: value } : item.investigation } : item));
   }
 
   async function upload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -176,10 +202,12 @@ export default function ApplyOS() {
               <Field label="Field of study" value={profile.field} update={(v) => setProfile((p) => ({ ...p, field: v }))} placeholder="e.g. Industrial engineering"/>
               <label className="field"><span>Academic level</span><select value={profile.level} onChange={(e) => setProfile((p) => ({ ...p, level: e.target.value }))}><option>Bachelor's student</option><option>Master's student</option><option>Doctoral student</option><option>Recent graduate</option><option>Other</option></select></label>
               <Field label="Expected graduation" value={profile.graduation} update={(v) => setProfile((p) => ({ ...p, graduation: v }))} placeholder="e.g. June 2027"/>
+              <Field label="Availability / start date" value={profile.availability ?? ""} update={(v) => setProfile((p) => ({ ...p, availability: v }))} placeholder="e.g. Available from May 2027"/>
               <Field wide label="Skills" value={profile.skills} update={(v) => setProfile((p) => ({ ...p, skills: v }))} placeholder="Python, research, data analysis"/>
               <Field wide label="Research & industry interests" value={profile.interests} update={(v) => setProfile((p) => ({ ...p, interests: v }))} placeholder="What would you love to work on?"/>
               <Field wide label="Experience & projects" value={profile.experience} update={(v) => setProfile((p) => ({ ...p, experience: v }))} placeholder="Relevant roles, research, projects"/>
               <Field wide label="Preferred locations" value={profile.locations} update={(v) => setProfile((p) => ({ ...p, locations: v }))} placeholder="Finland, Helsinki, remote"/>
+              <label className="field"><span>Opportunity type</span><select value={profile.roleMode ?? "internship"} onChange={(e) => setProfile((p) => ({ ...p, roleMode: e.target.value as Profile["roleMode"] }))}><option value="internship">Internship / Trainee only</option><option value="thesis">Master's / Bachelor's Thesis only</option><option value="both">Both</option></select></label>
               <label className="field"><span>Work preference</span><select value={profile.preference} onChange={(e) => setProfile((p) => ({ ...p, preference: e.target.value }))}><option>Hybrid or remote</option><option>Remote</option><option>Hybrid</option><option>On-site</option><option>Any</option></select></label>
               <Field label="Languages" value={profile.languages} update={(v) => setProfile((p) => ({ ...p, languages: v }))} placeholder="Finnish, English"/>
             </div></section>
@@ -191,29 +219,30 @@ export default function ApplyOS() {
           </div><aside className="side-panels"><div className="profile-score"><div className="score">{[profile.field, profile.university, profile.skills, profile.interests].filter(Boolean).length * 25}<small>%</small></div><h3>Your profile is taking shape</h3><p>Add your background and skills to get closer matches.</p>{["Study details", "Skills & interests", "Experience", "CV text"].map((t, i) => <div className="todo" key={t}><i>{[profile.field && profile.university, profile.skills || profile.interests, profile.experience, profile.cvText][i] ? "✓" : "+"}</i>{t}</div>)}</div><div className="privacy-card"><span>⌑</span><b>Private by default</b><p>Your profile, parsed CV, checklist and saved applications stay in this browser. Only broad, non-identifying criteria go to Exa.</p></div></aside></div>
         </section> : screen === "apps" ? <section className="apps-view">
           <div className="page-head"><div><label>YOUR NEXT STEPS, ORGANIZED</label><h1>My applications <span className="count">{apps.length}</span></h1><p>Keep your research and preparation moving forward.</p></div><button className="primary" onClick={() => setScreen("discover")}>Find opportunities →</button></div>
-          {!apps.length ? <div className="empty"><div>▱</div><h2>A good opportunity is worth keeping.</h2><p>Save a result from Discover and it’ll appear here with its evidence, requirements and next steps.</p><button className="primary" onClick={() => setScreen("discover")}>Explore opportunities →</button></div> : <div className="saved-list">{apps.map((item) => <button className="saved-item" key={item.id} onClick={() => { setSelected(item); setSummary(""); }}><span className="company-mark">{item.company.slice(0, 2).toUpperCase()}</span><span className="saved-copy"><small>{item.stage || "Discovered"}</small><b>{item.title}</b><span>{item.company} · {item.location}</span></span><span className="saved-progress">{(item.checklist || []).filter((x) => x.status === "Ready" || x.status === "Completed").length}/{(item.checklist || []).length || 5} ready</span><span className="saved-arrow">→</span></button>)}</div>}
+          {!apps.length ? <div className="empty"><div>▱</div><h2>A good opportunity is worth keeping.</h2><p>Save a result from Discover and it’ll appear here with its evidence, requirements and next steps.</p><button className="primary" onClick={() => setScreen("discover")}>Explore opportunities →</button></div> : <div className="saved-list">{apps.map((item) => <button className="saved-item" key={item.id} onClick={() => openOpportunity(item)}><span className="company-mark">{item.company.slice(0, 2).toUpperCase()}</span><span className="saved-copy"><small>{item.stage || "Discovered"}</small><b>{item.title}</b><span>{item.company} · {item.location}</span></span><span className="saved-progress">{(item.checklist || []).filter((x) => x.status === "Ready" || x.status === "Completed").length}/{(item.checklist || []).length || 5} ready</span><span className="saved-arrow">→</span></button>)}</div>}
         </section> : <>
           <div className="welcome"><div><label>● &nbsp; YOUR OPPORTUNITY DESK</label><h1>Good morning, {firstName}<span>✳</span></h1><p>One profile. Every opportunity. <b>Zero research.</b></p></div><span className="welcome-note">✦ &nbsp; Your next move, made clearer</span></div>
           <section className="hero"><div className="hero-icon">✳</div><h2>What are you looking for?</h2><p>Tell us what’s next. We’ll find the opportunities and the details that matter.</p>
-            <div className="scenario-row"><span>TRY AN EXAMPLE QUERY</span>{scenarios.map((scenario, i) => <button key={scenario[0]} className={"scenario scenario-" + i} disabled={busy} onClick={() => { setQuery(scenario[1]); void search(scenario[1]); }}><i>{["あ", "✳", "◉", "⌁"][i]}</i>Try Example Query · {scenario[0]} <b>↗</b></button>)}</div>
-            <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Or describe your own opportunity search..." aria-label="Describe your opportunity search"/><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
+            <div className="scenario-row"><span>TRY AN EXAMPLE QUERY</span>{scenarios.map((scenario, i) => <button key={scenario[0]} className={"scenario scenario-" + i} disabled={busy} onClick={() => { const roleMode = /thesis|diplomityö|gradu/i.test(scenario[1]) ? "thesis" : "internship"; setProfile((current) => ({ ...current, roleMode })); setQuery(scenario[1]); void search(scenario[1], roleMode); }}><i>{["あ", "✳", "◉", "⌁"][i]}</i>Try Example Query · {scenario[0]} <b>↗</b></button>)}</div>
+            <form className="search-form" onSubmit={(e) => { e.preventDefault(); void search(query); }}><span className="magnify">⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Or describe your own opportunity search..." aria-label="Describe your opportunity search"/><select aria-label="Filter by opportunity type" value={profile.roleMode ?? "internship"} onChange={(e) => setProfile((p) => ({ ...p, roleMode: e.target.value as Profile["roleMode"] }))}><option value="internship">Internships only</option><option value="thesis">Thesis roles only</option><option value="both">Both types</option></select><button disabled={!query.trim() || busy}>{busy ? "◌ Searching" : <>Find opportunities <span>→</span></>}</button></form>
           </section>
           {error && <div className="error-banner"><b>Research paused</b><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
           {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking real sources and reading original pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Reading original sources</span><span>Ranking your matches</span></div></div> : results.length ? <section className="results">
             <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{results.length} opportunities to explore</h2><p>Sorted by how closely each source fits your search.</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
             {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {formatSafeTimestamp(activity.researchedAt)}</span><em>See queries +</em></summary>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {formatSafeTimestamp(activity.freshnessStart)} · thesis search remains broad.</p>}<ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}</details>}
             {constraintExplanation && <div className="partial-warning">{constraintExplanation}</div>}
-            {closedResults.length > 0 && <button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show closed opportunities"} ({closedResults.length})</button>}
-            <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>
-            {showClosed && <div className="result-list closed-results">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}
+            {activity && results.length > 1 && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}
+            {activity && results.length <= 1 && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}
+            {activity && results.length <= 1 && <CoverageCard activity={activity} resultCount={results.length}/>}
+            <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => openOpportunity(item)} onSimilar={() => void findSimilar(item)}/>)}</div>
             <p className="disclaimer">ⓘ Opportunity availability can change. Always confirm status and requirements with the organization.</p>
           </section> : <section className="starter"><div className="section-head"><div><label>YOUR STARTING POINT</label><h2>A little context goes a long way.</h2></div><span>A more complete profile means closer matches.</span></div><div className="starter-grid"><button className="starter-card" onClick={() => setScreen("profile")}><i className="purple">♙</i><span><b>Build your profile</b><small>{profile.field || "Add your studies, skills and interests"}</small></span><strong>→</strong><div className="progress"><i style={{ width: [profile.field, profile.skills, profile.university, profile.interests].filter(Boolean).length * 25 + "%" }}/></div></button><button className="starter-card" onClick={() => setScreen("apps")}><i className="green">▱</i><span><b>Save your first opportunity</b><small>{apps.length ? apps.length + " saved in your workspace" : "Keep interesting roles in one place"}</small></span><strong>→</strong><div className="progress"><i style={{ width: apps.length ? "100%" : "0%" }}/></div></button></div><div className="privacy-message"><b>⌑ &nbsp; Your profile stays yours.</b><span>Personal details stay on this device. Only broad, non-identifying search criteria go to Exa.</span></div></section>}
         </>}
-        {screen === "discover" && hasSearched && !busy && !results.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>{closedResults.length > 0 && <><button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show closed opportunities"} ({closedResults.length})</button>{showClosed && <div className="result-list">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}</>}</>}
+        {screen === "discover" && hasSearched && !busy && !results.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>{activity && (activity.filteredOutExpired ?? 0) > 0 && <p className="filtered-count">Filtered out {activity.filteredOutExpired} expired listings.</p>}{activity && <CoverageCard activity={activity} resultCount={0}/>}</>}
       </div>
       <footer><b>✳ APPLYOS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
     </section>
-    {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} similar={similarById[selected.id]} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)} onSimilar={() => void findSimilar(selected)} onManualDocument={(document) => toggleManualDocument(selected.id, document)}/>}
+    {selected && <Drawer item={selected} saved={saved.has(selected.id)} researching={researching} summary={summary} error={error} similar={similarById[selected.id]} draftMessage={draftMessage} onDraftChange={updateDraft} onDraftReset={resetDraft} onDraftCopy={() => void copyDraft()} onClose={() => { setSelected(null); setError(""); }} onSave={() => toggleSave(selected)} onInvestigate={() => void investigate(selected)} onChecklist={(key, status) => setChecklist(selected.id, key, status)} onSimilar={() => void findSimilar(selected)} onManualDocument={(document) => toggleManualDocument(selected.id, document)}/>}
     {message && <div className="toast">✓ &nbsp; {message}</div>}
     <input ref={inputRef} hidden type="file" accept=".pdf,application/pdf" onChange={upload}/>
   </main>;
@@ -248,6 +277,10 @@ function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query
   </section>;
 }
 
+function CoverageCard({ activity, resultCount }: { activity: { queries: string[]; sources: number; sourceDomains?: string[]; roleMode?: string; filteredOutExpired?: number; failedQueries?: Array<{ query: string; error: string }> }; resultCount: number }) {
+  return <section className="coverage-card"><div><small>SEARCH SCOPE & COVERAGE</small><b>{resultCount === 0 ? "No currently open matching roles surfaced." : "Only a few matching open roles surfaced."}</b><p>Exa searched {activity.sources} live source result(s) across {activity.queries.length} queries with the {activity.roleMode ?? "internship"} role filter. Expired and unverifiable listings are excluded from active results. Coverage reflects the sources returned for this query, not the full job market.</p></div><details><summary>Live source domains and queries</summary>{activity.sourceDomains?.length ? <ul>{activity.sourceDomains.map((domain) => <li key={domain}>{domain}</li>)}</ul> : <p>No source domains were returned.</p>}<ul>{activity.queries.map((query) => <li key={query}>{query}</li>)}</ul>{activity.failedQueries?.map((failure) => <p key={failure.query}>A query failed: {failure.error}</p>)}</details></section>;
+}
+
 function OpportunityCard({ item, saved, index, similar, onSave, onOpen, onSimilar }: {
   item: Opportunity;
   saved: boolean;
@@ -279,13 +312,17 @@ function Citation({ sourceUrl, evidenceExcerpt, fallbackUrl }: { sourceUrl: stri
   return <div className="citation"><a href={href} target="_blank" rel="noopener noreferrer">Source ↗</a>{evidenceExcerpt && <blockquote>“{evidenceExcerpt}”</blockquote>}</div>;
 }
 
-function Drawer({ item, saved, researching, summary, error, similar, onClose, onSave, onInvestigate, onChecklist, onSimilar, onManualDocument }: {
+function Drawer({ item, saved, researching, summary, error, similar, draftMessage, onDraftChange, onDraftReset, onDraftCopy, onClose, onSave, onInvestigate, onChecklist, onSimilar, onManualDocument }: {
   item: Opportunity;
   saved: boolean;
   researching: boolean;
   summary: string;
   error: string;
   similar?: { loading: boolean; results: SimilarOpportunity[]; error: string };
+  draftMessage: string;
+  onDraftChange: (value: string) => void;
+  onDraftReset: () => void;
+  onDraftCopy: () => void;
   onClose: () => void;
   onSave: () => void;
   onInvestigate: () => void;
@@ -314,6 +351,18 @@ function Drawer({ item, saved, researching, summary, error, similar, onClose, on
       {investigation?.failures?.length ? <div className="source-warning"><b>Some source checks were incomplete</b><ul>{investigation.failures.map((failure, index) => <li key={index}>{failure}</li>)}</ul>Available source evidence is still shown below.</div> : null}
       {investigation?.applicationSteps?.length ? <div className="application-steps"><b>Application steps from sources</b><ol>{investigation.applicationSteps.map((step) => <li key={step.order}><span>{step.step}</span><Citation sourceUrl={step.sourceUrl} evidenceExcerpt={step.evidenceExcerpt} fallbackUrl={item.source.url}/></li>)}</ol></div> : null}
       <div className="source-list"><b>Researched sources</b>{sources.length ? sources.map((source) => { const href = safeHttpsUrl(source.url, item.source.url); return <div key={source.url}>{href ? <a href={href} target="_blank" rel="noopener noreferrer">{source.title} ↗</a> : <span>{source.title}</span>}{source.publishedDate && <small>Published {formatSafeTimestamp(source.publishedDate)}</small>}</div>; }) : <div className="source-box"><p>{item.source.excerpt || "No source excerpt is available yet."}</p>{safeHttpsUrl(item.source.url) && <a href={safeHttpsUrl(item.source.url) ?? undefined} target="_blank" rel="noopener noreferrer">{item.source.title} ↗</a>}</div>}</div>
+    </section>
+
+    <section className="drawer-section practical-section"><div className="drawer-section-head"><div><small>ROLE TERMS & PRACTICAL REQUIREMENTS</small><h3>What the announcement says</h3></div><span>{investigation?.practicalFacts?.length ?? 0} source facts</span></div>
+      {investigation?.practicalFacts?.length ? <div className="verified-requirements">{investigation.practicalFacts.map((fact, index) => <article key={fact.sourceUrl + fact.category + index}><div className="requirement-title"><b>{fact.label}</b></div><p className="practical-value">{fact.value}</p><Citation sourceUrl={fact.sourceUrl} evidenceExcerpt={fact.evidenceExcerpt} fallbackUrl={item.source.url}/></article>)}</div> : <p className="research-note">No practical terms were verified in the returned excerpts. Location, duration, compensation, work arrangement, documents and eligibility may need confirmation.</p>}
+    </section>
+
+    <section className="drawer-section contact-section"><div className="drawer-section-head"><div><small>DIRECT CONTACT & OUTREACH</small><h3>Reach the organization</h3></div><span>{investigation?.contactPerson ? "Source discovered" : "No named contact verified"}</span></div>
+      {investigation?.contactPerson ? <><div className="contact-card"><b>{investigation.contactPerson.name}</b>{investigation.contactPerson.role && <span>{investigation.contactPerson.role}</span>}{investigation.contactPerson.email && <a href={`mailto:${investigation.contactPerson.email}`}>{investigation.contactPerson.email}</a>}<Citation sourceUrl={investigation.contactPerson.sourceUrl} evidenceExcerpt={investigation.contactPerson.evidenceExcerpt} fallbackUrl={item.source.url}/></div><p className="research-note">Contact details are shown only when present in the retrieved source quote. Use the draft below as a starting point.</p></> : <p className="research-note">No real person or direct email was verified. The employer’s application pages remain the best source for next steps.</p>}
+    </section>
+
+    <section className="drawer-section draft-section"><div className="drawer-section-head"><div><small>PRE-APPLICATION / OUTREACH MESSAGE</small><h3>Draft for your review</h3></div><span>Never sent automatically</span></div>
+      {investigation ? <><p className="manual-explainer">Review and edit this profile-based draft before using it. No message is sent by APPLYOS.</p><textarea className="outreach-draft" value={draftMessage} onChange={(event) => onDraftChange(event.target.value)} aria-label="Editable pre-application message draft"/><div className="draft-actions"><button onClick={onDraftCopy}>Copy Message</button><button onClick={onDraftReset}>Reset Draft</button></div></> : <p className="research-note">Investigate this opportunity to prepare a draft grounded in your profile and verified source facts.</p>}
     </section>
 
     <section className="drawer-section verified-section"><div className="drawer-section-head"><div><small>SOURCE-VERIFIED REQUIREMENTS</small><h3>What the sources ask for</h3></div><span>{investigation?.verifiedRequirements.length ?? 0} verified</span></div>
