@@ -14,7 +14,7 @@ export type SourceClassification = {
 const profilePage = /\b(linkedin\.com\/in\/|people|personnel|our people|staff directory|researcher profile|staff profile|faculty profile|biography|bio|dr\.|professor)\b/i;
 const archivePage = /\b(archive|archived|thesis repository|institutional repository|repository|dissertations|completed thesis|past project|project archive|historical)\b/i;
 const guidancePage = /\b(careers|career opportunities|how to apply|application process|internship opportunities|jobs and careers|join our team|open positions)\b/i;
-const rolePage = /\b(intern(ship)?|trainee(ship)?|summer student|student assistant|student (?:intern(ship)?|position|role|job|worker|researcher|program(me)?|opportunity|fellowship)|research assistant|thesis (project|topic|position|worker)|thesis worker|diplomity[oö](?:ntekijä)?|gradutoimeksianto|doctoral position|fellowship for students|scholarship for students|harjoittel(?:u|ija|upaikka)|kesäty[oö](?:ntekijä)?|junior|entry[- ]level)\b/i;
+const rolePage = /\b(intern(ship)?|trainee(ship)?|summer (?:student|job|jobs|work|position|role)|student assistant|working student|student (?:intern(ship)?|position|role|job|worker|researcher|program(me)?|opportunity|fellowship)|research assistant|thesis (project|topic|position|worker)|thesis worker|diplomity[oö](?:ntekijä)?|gradutoimeksianto|doctoral position|fellowship for students|scholarship for students|harjoittel(?:u|ija|upaikka|utehtävä)|kesäty[oö](?:ntekijä|paikka)?|junior|entry[- ]level)\b/i;
 const generalStudentProgram = /\b(?:(?:student|graduate|trainee|thesis|early[- ]career)\s+(?:trainee\s+)?program(?:me)?|program(?:me)?\s+for\s+(?:students|graduates|trainees)|graduate (?:trainee|development) program)\b/i;
 const routeApply = /\b(apply now|apply by|submit (?:an? )?application|applications? (?:are )?open|application (?:window|period)|accepting applications|now accepting|application deadline|send your application|apply through|applications close|hakuaika|hae (?:nyt|ennen)|haku päättyy)\b/i;
 const routePropose = /\b(propose (?:a )?(?:thesis|project|topic)|thesis proposals? (?:are )?(?:welcome|invited|accepted)|students? (?:can|may|are invited to) propose|we welcome thesis|opinnäyte.{0,30}(?:ehdot|aihe)|diplomityö.{0,30}(?:aihe|ehdot))\b/i;
@@ -58,6 +58,32 @@ export function classifyOpportunitySource(input: { title: string; url: string; t
   if (/\b(research group|laboratory|lab group|research areas|our research|research topics|research team)\b/i.test(combined)) return { category: "organization-overview", availability: null, reason: "This page describes an organization or research area without a specific student opening or proposal route.", evidenceExcerpt: text.slice(0, 360), applicationRoute: "none" };
   if (profilePage.test(combined)) return { category: "personal-profile", availability: null, reason: "This source appears to be a personal or researcher profile, not an opportunity posting.", evidenceExcerpt: null, applicationRoute: "none" };
   return { category: "irrelevant", availability: null, reason: "The source does not substantiate a specific student opportunity or useful application guidance.", evidenceExcerpt: null, applicationRoute: "none" };
+}
+
+/** Classify an Exa search preview when the original page could not be fetched.
+ * A preview can support a lead to review, but can never qualify it as verified.
+ */
+export function classifyOpportunityPreview(input: { title: string; url: string; text: string; deadlineIsPast?: boolean }): SourceClassification {
+  const sourceResult = classifyOpportunitySource(input);
+  if (sourceResult.category === "archived-work" || sourceResult.category === "personal-profile") return sourceResult;
+  const text = input.text.replace(/\s+/g, " ").trim();
+  const combined = `${input.title} ${text}`;
+  const explicitStudentRole = rolePage.test(combined);
+  const juniorWithoutStudentContext = /\b(junior|entry[- ]level)\b/i.test(combined) && !/\b(student|graduate|trainee|intern|thesis|undergraduate|enrolled)\b/i.test(combined);
+  const seniorPermanentTitle = /\b(senior|principal|director|permanent full[- ]time)\b/i.test(input.title) && !/\b(intern|trainee|thesis|research assistant)\b/i.test(input.title);
+  const hasSpecificRoleTitle = rolePage.test(input.title) && input.title.trim().split(/\s+/).length >= 2 && !genericOpportunityTitle.test(input.title.trim());
+  if (!explicitStudentRole || juniorWithoutStudentContext || seniorPermanentTitle || (sourceResult.category !== "specific-opportunity" && !hasSpecificRoleTitle)) return sourceResult;
+  const evidenceExcerpt = (sourceResult.evidenceExcerpt ?? [input.title, text].filter(Boolean).join(" — ")).slice(0, 420);
+  const isClosed = input.deadlineIsPast || explicitClosed.test(text);
+  return {
+    category: "specific-opportunity",
+    availability: isClosed ? "Closed" : "Unverified",
+    reason: isClosed
+      ? "The Exa search preview indicates this role is closed or expired."
+      : "The Exa search preview suggests a specific student role, but the original page was unavailable to verify its details or current availability.",
+    evidenceExcerpt,
+    applicationRoute: sourceResult.applicationRoute,
+  };
 }
 
 export type RelatedInformation = { id: string; title: string; url: string; excerpt: string; category: SourceCategory; reason: string };

@@ -134,10 +134,11 @@ export function classifyOpportunity(title: string, text: string): { eligible: bo
   const value = `${title} ${text}`.toLowerCase();
   if (/senior|principal|director|permanent full[- ]time/.test(value) && !/intern|thesis|trainee|research assistant/.test(title.toLowerCase())) return { eligible: false, type: "Unrelated role" };
   if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis|gradutoimeksianto|gradu\b/.test(title.toLowerCase())) return { eligible: true, type: "Master's Thesis / Diplomityö" };
-  if (/intern|harjoittel|trainee|kesäty[oö]|summer student/.test(title.toLowerCase())) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/intern|harjoittel|trainee|kesäty[oö]|summer (?:student|job|jobs|work|position|role)/.test(title.toLowerCase())) return { eligible: true, type: "Internship / Harjoittelu" };
   if (/master'?s thesis|bachelor'?s thesis|thesis worker|diplomity|thesis (?:position|work|project)|gradutoimeksianto|gradu\b/.test(value)) return { eligible: true, type: "Master's Thesis / Diplomityö" };
-  if (/intern|harjoittel|trainee|kesäty[oö]|summer student/.test(value)) return { eligible: true, type: "Internship / Harjoittelu" };
-  if (/\b(student|opiskelija)\b/.test(value) && /\b(assistant|worker|position|role|job|researcher|junior|entry[- ]level)\b/.test(value)) return { eligible: true, type: "Student role" };
+  if (/intern|harjoittel|trainee|kesäty[oö]|summer (?:student|job|jobs|work|position|role)/.test(value)) return { eligible: true, type: "Internship / Harjoittelu" };
+  if (/\bworking student\b/.test(value)) return { eligible: true, type: "Student role" };
+  if (/\b(student|opiskelija|working student)\b/.test(value) && /\b(assistant|worker|position|role|job|researcher|junior|entry[- ]level|internship)\b/.test(value)) return { eligible: true, type: "Student role" };
   if (/research assistant/.test(value)) return { eligible: true, type: "Research Assistant" };
   return { eligible: false, type: "Unrelated role" };
 }

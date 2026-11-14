@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
 import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, isLegitimateOpportunitySource, locationConstraintMatch, matchesStudentProfile, parseSearchConstraints } from "@/lib/matching";
-import { classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation, type SourceClassification } from "@/lib/opportunity-classification";
+import { classifyOpportunityPreview, classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation } from "@/lib/opportunity-classification";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -197,7 +197,7 @@ export async function POST(request: Request) {
       const fullText = pageContent ? [pageContent.text, ...(pageContent.highlights ?? []), pageContent.summary].filter((value): value is string => Boolean(value)).join("\n") : searchText;
       const isCandidate = looksPromising(raw);
       let classification = isCandidate && !pageContent
-        ? { category: "unretrievable", availability: null, reason: contentFailures.length ? "The candidate page could not be retrieved, so APPLYOS cannot verify it." : "This specific-looking result was not among the source pages retrieved for verification.", evidenceExcerpt: null, applicationRoute: "none" } as SourceClassification
+        ? classifyOpportunityPreview({ title: raw.title ?? "Untitled source", url: raw.url ?? "", text: searchText, deadlineIsPast: parseOpportunityDeadline(searchText, raw.highlights ?? [], now.toISOString().slice(0, 10))?.isPast })
         : classifyOpportunitySource({ title: raw.title ?? "Untitled source", url: raw.url ?? "", text: fullText, deadlineIsPast: parseOpportunityDeadline(fullText, raw.highlights ?? [], now.toISOString().slice(0, 10))?.isPast });
       const legitimacy = isLegitimateOpportunitySource(raw.url ?? "", raw.title ?? "", fullText);
       if (classification.category === "specific-opportunity" && !legitimacy.legitimate) {
@@ -226,7 +226,7 @@ export async function POST(request: Request) {
     });
     const relatedInformation: RelatedInformation[] = sourceReviews.flatMap(({ raw, classification }) => isUsefulRelatedInformation(classification) && raw.url ? [{ id: String(raw.id ?? raw.url), title: raw.title ?? "Application guidance", url: raw.url, excerpt: classification.evidenceExcerpt ?? "", category: classification.category, reason: classification.reason }] : []);
 
-    const candidateReviews = sourceReviews.filter(({ classification, pageContent }) => pageContent && classification.category === "specific-opportunity");
+    const candidateReviews = sourceReviews.filter(({ classification }) => classification.category === "specific-opportunity");
     const uniqueCandidates = new Map<string, typeof candidateReviews[number]>();
     for (const review of candidateReviews) {
       const key = opportunityDeduplicationKey(review.raw.title ?? "", review.raw.url ?? "");
@@ -247,8 +247,12 @@ export async function POST(request: Request) {
       const availabilityStatus = classification.availability ?? "Unverified";
       const qualifiesAsVerified = availabilityStatus !== "Closed" && availabilityStatus !== "Unverified";
       const applicationNote = qualifiesAsVerified && !item.deadline ? classification.generalProgram ? "General trainee/thesis program — reach out directly" : "Rolling / deadline not listed" : undefined;
-      const sourceQualityNote = legitimacy.quality === "official" ? "Verified · Official source" : "Verified · Secondary source (confirm on host site)";
-      const confirmationNote = legitimacy.quality === "secondary" ? "Confirm current intake window on the employer's official site." : availabilityStatus === "Unverified" ? "Confirm the current intake window directly with the organization." : undefined;
+      const sourceQualityNote = availabilityStatus === "Unverified"
+        ? legitimacy.quality === "official" ? "Official source · role needs confirmation" : "Secondary source · confirm on host site"
+        : legitimacy.quality === "official" ? "Verified · Official source" : "Verified · Secondary source (confirm on host site)";
+      const confirmationNote = availabilityStatus === "Unverified"
+        ? classification.reason
+        : legitimacy.quality === "secondary" ? "Confirm current intake window on the employer's official site." : undefined;
       const applicationStatus = availabilityStatus === "Verified" ? "Verified" : availabilityStatus === "Open" ? "Open" : availabilityStatus === "Upcoming" ? item.applicationStatus?.startsWith("Upcoming") ? item.applicationStatus : "Upcoming" : item.applicationStatus;
       const sourceQuality = legitimacy.quality === "secondary" ? "secondary" as const : "official" as const;
       return [{ ...item, status: opportunityAvailabilityStatus(availabilityStatus), availabilityStatus, qualificationStatus: qualifiesAsVerified ? "Verified" as const : undefined, sourceQuality, sourceQualityNote, confirmationNote, applicationStatus, applicationNote, classificationReason: classification.reason, classificationEvidence: evidence, source: { ...item.source, excerpt: evidence } }];

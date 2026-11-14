@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canShowAsActiveOpportunity,
   canShowAsUnverifiedOpportunity,
+  classifyOpportunityPreview,
   classifyOpportunitySource,
   isUsefulRelatedInformation,
   opportunityDeduplicationKey,
@@ -44,6 +45,14 @@ test("a specific role from a legitimate source stays Verified despite ambiguous 
   assert.equal(result.availability, "Verified");
   assert.equal(result.applicationRoute, "none");
   assert.equal(canShowAsActiveOpportunity(result), true);
+});
+
+test("a student role in an Exa preview remains visible as unverified when page retrieval fails", () => {
+  const result = classifyOpportunityPreview({ title: "Summer Jobs at Nokia", url: "https://www.nokia.com/careers/summer-jobs", text: "Summer jobs for university students in software testing and engineering." });
+  assert.equal(result.category, "specific-opportunity");
+  assert.equal(result.availability, "Unverified");
+  assert.match(result.reason, /original page was unavailable/i);
+  assert.equal(canShowAsUnverifiedOpportunity(result), true);
 });
 
 test("a named recurring student program with a future application window is Upcoming", () => {
