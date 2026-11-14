@@ -18,11 +18,15 @@ const checklistDefaults: ChecklistItem[] = [
 ];
 
 function persist(key: string, value: unknown) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Local storage may be unavailable. */ } }
+function safeDateTime(value?: string | null) { if (!value || Number.isNaN(Date.parse(value))) return "Just now"; return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 
 export default function ApplyOS() {
   const [profile, setProfile] = useState<Profile>(empty);
   const [apps, setApps] = useState<Opportunity[]>([]);
   const [results, setResults] = useState<Opportunity[]>([]);
+  const [closedResults, setClosedResults] = useState<Opportunity[]>([]);
+  const [showClosed, setShowClosed] = useState(false);
+  const [constraintExplanation, setConstraintExplanation] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [activity, setActivity] = useState<{ queries: string[]; sources: number; researchedAt: string; freshnessStart?: string | null; failedQueries?: Array<{ query: string; error: string }> } | null>(null);
   const [screen, setScreen] = useState<"discover" | "profile" | "apps">("discover");
@@ -60,7 +64,7 @@ export default function ApplyOS() {
       const res = await fetch("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: q, profile }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not search right now.");
-      setResults(data.opportunities || []); setActivity(data.activity || null);
+      setResults(data.opportunities || []); setClosedResults(data.closedResults || []); setShowClosed(false); setConstraintExplanation(data.constraintExplanation || null); setActivity(data.activity || null);
     } catch (e) { setError(e instanceof Error ? e.message : "Search failed."); }
     finally { setBusy(false); }
   }
@@ -190,12 +194,15 @@ export default function ApplyOS() {
           {error && <div className="error-banner"><b>Research paused</b><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
           {busy ? <div className="loading"><div className="loader">✳</div><label>LIVE RESEARCH IN PROGRESS</label><h2>Searching the web for your next move</h2><p>APPLYOS is checking real sources and reading original pages.</p><div className="load-steps"><span>✓ Planning your search</span><span>◌ Searching with Exa</span><span>Reading original sources</span><span>Ranking your matches</span></div></div> : results.length ? <section className="results">
             <div className="result-head"><div><label>YOUR RESEARCH, READY</label><h2>{results.length} opportunities to explore</h2><p>Sorted by how closely each source fits your search.</p></div><span className="live-chip"><i/> LIVE EXA SEARCH</span></div>
-            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {new Date(activity.researchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span><em>See queries +</em></summary>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {new Date(activity.freshnessStart).toLocaleDateString()} · thesis search remains broad.</p>}<ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}</details>}
+            {activity && <details className="activity"><summary><b>✳ Research activity</b><span>Exa searched {activity.sources} sources across {activity.queries.length} focused queries · {safeDateTime(activity.researchedAt)}</span><em>See queries +</em></summary>{activity.freshnessStart && <p className="freshness-note">Recent opportunity search window starts {Number.isNaN(Date.parse(activity.freshnessStart)) ? "recently" : new Date(activity.freshnessStart).toLocaleDateString()} · thesis search remains broad.</p>}<ul>{activity.queries.map((q) => <li key={q}>{q}</li>)}</ul>{activity.failedQueries?.length ? <div className="partial-warning"><b>Some searches did not finish.</b>{activity.failedQueries.map((item) => <p key={item.query}>{item.error} <small>Query: {item.query}</small></p>)}</div> : null}</details>}
+            {constraintExplanation && <div className="partial-warning">{constraintExplanation}</div>}
+            {closedResults.length > 0 && <button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show"} {closedResults.length} closed/expired results</button>}
             <div className="result-list">{results.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>
+            {showClosed && <div className="result-list closed-results">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}
             <p className="disclaimer">ⓘ Opportunity availability can change. Always confirm status and requirements with the organization.</p>
           </section> : <section className="starter"><div className="section-head"><div><label>YOUR STARTING POINT</label><h2>A little context goes a long way.</h2></div><span>A more complete profile means closer matches.</span></div><div className="starter-grid"><button className="starter-card" onClick={() => setScreen("profile")}><i className="purple">♙</i><span><b>Build your profile</b><small>{profile.field || "Add your studies, skills and interests"}</small></span><strong>→</strong><div className="progress"><i style={{ width: [profile.field, profile.skills, profile.university, profile.interests].filter(Boolean).length * 25 + "%" }}/></div></button><button className="starter-card" onClick={() => setScreen("apps")}><i className="green">▱</i><span><b>Save your first opportunity</b><small>{apps.length ? apps.length + " saved in your workspace" : "Keep interesting roles in one place"}</small></span><strong>→</strong><div className="progress"><i style={{ width: apps.length ? "100%" : "0%" }}/></div></button></div><div className="privacy-message"><b>⌑ &nbsp; Your profile stays yours.</b><span>Personal details stay on this device. Only broad, non-identifying search criteria go to Exa.</span></div></section>}
         </>}
-        {screen === "discover" && hasSearched && !busy && !results.length && <EmptyResults query={query} error={error} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>}
+        {screen === "discover" && hasSearched && !busy && !results.length && <><EmptyResults query={query} error={error} explanation={constraintExplanation} onRetry={() => void search(query)} onBroader={(value) => void search(value)}/>{closedResults.length > 0 && <><button className="similar-trigger" onClick={() => setShowClosed((value) => !value)}>{showClosed ? "Hide" : "Show"} {closedResults.length} closed/expired results</button>{showClosed && <div className="result-list">{closedResults.map((item, i) => <OpportunityCard key={item.id} item={item} saved={saved.has(item.id)} similar={similarById[item.id]} index={i} onSave={() => toggleSave(item)} onOpen={() => { setSelected(item); setSummary(""); }} onSimilar={() => void findSimilar(item)}/>)}</div>}</>}</>}
       </div>
       <footer><b>✳ APPLYOS</b><span>· Your next opportunity starts here</span><span className="footer-right">Built for students, with care <b>♥</b></span></footer>
     </section>
@@ -223,11 +230,11 @@ function SimilarPanel({ state }: { state?: { loading: boolean; results: SimilarO
   </div>;
 }
 
-function EmptyResults({ query, error, onRetry, onBroader }: { query: string; error: string; onRetry: () => void; onBroader: (query: string) => void }) {
+function EmptyResults({ query, error, explanation, onRetry, onBroader }: { query: string; error: string; explanation?: string | null; onRetry: () => void; onBroader: (query: string) => void }) {
   return <section className="empty-results">
     <div className="empty-results-icon">{error ? "!" : "⌕"}</div>
     <div className="empty-results-copy"><label>{error ? "SEARCH NEEDS ANOTHER TRY" : "NO MATCHES IN THIS SEARCH"}</label><h2>{error ? "We couldn’t complete that search." : "No student opportunities surfaced for this query."}</h2>
-      <p>{error || "Try a broader field, remove a location or date constraint, or search using a neighboring role title. APPLYOS only shows opportunities returned by live sources."}</p>
+      <p>{error || explanation || "Try a broader field, remove a location or date constraint, or search using a neighboring role title. APPLYOS only shows opportunities returned by live sources."}</p>
       {!error && <div className="broader-tips"><span>Try:</span><button onClick={() => onBroader(query + " internship OR thesis")}>internships or thesis roles</button><button onClick={() => onBroader(query + " Finland OR Europe")}>a wider location</button><button onClick={() => onBroader("student research assistant " + query)}>student research roles</button></div>}
       {error && <button className="primary" onClick={onRetry}>Retry search <span>→</span></button>}
     </div>
@@ -244,11 +251,11 @@ function OpportunityCard({ item, saved, index, similar, onSave, onOpen, onSimila
   onSimilar: () => void;
 }) {
   const isOpen = item.status === "Verified open" || item.status === "Possibly open";
-  const published = item.publishedDate ? new Date(item.publishedDate).toLocaleDateString() : "Publication date unknown";
+  const published = item.publishedDate && !Number.isNaN(Date.parse(item.publishedDate)) ? new Date(item.publishedDate).toLocaleDateString() : "Publication date unknown";
   return <article className="opportunity" style={{ animationDelay: index * 60 + "ms" }}>
     <div className="opportunity-head"><span className={"company-mark mark-" + (index % 4)}>{item.company.slice(0, 2).toUpperCase()}</span><div className="company-info"><div><b>{item.company}</b><span className="source-found">◉ Source found</span></div><h3>{item.title}<i>{item.type}</i></h3></div><button className={saved ? "bookmark saved" : "bookmark"} onClick={onSave} aria-label={saved ? "Remove saved opportunity" : "Save opportunity"}>{saved ? "♥" : "♡"}</button></div>
     <div className="opportunity-badges"><span className="role-badge">{item.type}</span><span className="published-badge">◷ Published · {published}</span></div>
-    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.location}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : "Deadline not specified"}</span><span className={isOpen ? "status open" : "status"}><i/>{item.status}</span></div>
+    <p className="opportunity-summary">{item.summary}</p><div className="facts"><span>⌖ &nbsp;{item.locationLabel || item.location}{item.locationSnippet ? ` · “${item.locationSnippet}”` : ""}</span><span>◷ &nbsp;{item.deadline ? "Deadline " + item.deadline : item.programCycle ? "Program cycle · " + item.programCycle : "Deadline not specified"}</span><span className={isOpen ? "status open" : "status"}><i/>{item.applicationStatus || item.status}</span></div>
     <div className="match"><span><i style={{ width: item.match + "%" }}/></span><b>{item.match}% match</b><em>· {item.matchReason}</em></div>
     <details className="match-details"><summary>Why this match? <b>+</b></summary><div><span><b>Matched skills</b>{item.matchedSkills?.length ? item.matchedSkills.map((skill) => <i key={skill}>{skill}</i>) : <small>No specific skill overlap found</small>}</span><span><b>Location</b><small className={"location-" + (item.locationMatch || "unknown")}>{item.locationMatch || "unknown"}</small></span><span><b>Still to verify</b><small>{item.missingInfo?.length ? item.missingInfo.join(" · ") : "No key information flagged"}</small></span></div></details>
     <div className="quote"><span>“</span><p>{item.source.excerpt || "Source page found by Exa. Open this result to read the evidence and investigate requirements."}</p></div>

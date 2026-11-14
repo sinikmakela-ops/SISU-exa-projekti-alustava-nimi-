@@ -35,6 +35,14 @@ export type Opportunity = {
   match: number; matchReason: string; requirements: string[]; source: { title: string; url: string; excerpt: string };
   matchedSkills?: string[];
   locationMatch?: "match" | "mismatch" | "unknown";
+  locationLabel?: string;
+  locationSnippet?: string | null;
+  matchedTopics?: string[];
+  eligibilityStatus?: string;
+  applicationStatus?: "Verified open" | "Possibly open" | "Unknown" | "Closed";
+  closedEvidence?: string | null;
+  programCycle?: string | null;
+  constraintMismatches?: string[];
   missingInfo?: string[];
   manualDocuments?: string[];
   investigation?: InvestigationData;
