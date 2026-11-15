@@ -1,40 +1,10 @@
 import { NextResponse } from "next/server";
-import { CONTENT_OPTIONS, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
+import { buildOpportunitySearchQueries, exaRequest, ExaPage, publishedWithinDays } from "@/lib/exa";
 import { classifyOpportunity, explainOpportunityMatch, extractAcademicCycle, extractDeadline as parseOpportunityDeadline, extractLocationInfo, extractProgramCycle, inferOpportunityRoleMode, isAllowedRoleMode, isLegitimateOpportunitySource, locationConstraintMatch, parseSearchConstraints } from "@/lib/matching";
 import { classifyOpportunityPreview, classifyOpportunitySource, isUsefulRelatedInformation, opportunityAvailabilityStatus, opportunityDeduplicationKey, type RelatedInformation } from "@/lib/opportunity-classification";
 import type { Opportunity, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
-
-type SearchPlan = { query: string; startPublishedDate?: string };
-
-function queriesFor(query: string, profile: Partial<Profile>, now = new Date()): SearchPlan[] {
-  const base = query;
-  const mode = inferOpportunityRoleMode(query, profile.roleMode);
-  const internshipQuery = base + " (internship OR traineeship OR harjoittelu OR harjoittelupaikka) student opportunity";
-  const thesisQuery = base + " (master's thesis OR bachelor's thesis OR diplomityö OR gradutoimeksianto OR thesis worker) university company";
-  if (mode === "internship") return [
-    { query: internshipQuery, startPublishedDate: publishedWithinDays(90, now) },
-    { query: base + " (internship OR trainee OR research assistant) student role" },
-    { query: base + " (summer student OR kesätyö OR harjoittelu) university company" },
-  ];
-  if (mode === "thesis") return [
-    { query: thesisQuery, startPublishedDate: publishedWithinDays(90, now) },
-    { query: base + " thesis position master's bachelor's diplomityö gradu" },
-    { query: base + " research topic company university thesis project" },
-  ];
-  return [
-    {
-      query: internshipQuery,
-      startPublishedDate: publishedWithinDays(90, now),
-    },
-    {
-      query: thesisQuery + " OR research assistant",
-      startPublishedDate: publishedWithinDays(90, now),
-    },
-    { query: base + " (summer student OR kesätyö OR harjoittelu OR thesis project OR gradutoimeksianto)" },
-  ];
-}
 
 function determineStatus(text: string, publishedDate?: string, now = new Date()): Opportunity["status"] {
   const deadline = parseOpportunityDeadline(text, [], now.toISOString().slice(0, 10));
@@ -111,6 +81,8 @@ function normalize(raw: ExaPage, query: string, profile: Partial<Profile>, now: 
 
 async function extractWithOpenAI(items: Opportunity[], query: string): Promise<Opportunity[]> {
   if (!process.env.OPENAI_API_KEY || !items.length) return items;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3_000);
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -125,6 +97,7 @@ async function extractWithOpenAI(items: Opportunity[], query: string): Promise<O
         ],
       }),
       cache: "no-store",
+      signal: controller.signal,
     });
     if (!response.ok) return items;
     const body = await response.json();
@@ -141,6 +114,8 @@ async function extractWithOpenAI(items: Opportunity[], query: string): Promise<O
     });
   } catch {
     return items;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -151,14 +126,14 @@ export async function POST(request: Request) {
     if (!query) return NextResponse.json({ error: "Add a study area or opportunity goal to start your search." }, { status: 400 });
 
     const now = new Date();
-    const plan = queriesFor(query, body.profile ?? {}, now);
+    const plan = buildOpportunitySearchQueries(query, { ...body.profile, roleMode: inferOpportunityRoleMode(query, body.profile?.roleMode) }, now);
     const settled = await Promise.allSettled(plan.map((item) => exaRequest<{ results?: ExaPage[] }>("/search", {
       query: item.query,
       type: "auto",
-      numResults: 12,
+      numResults: 25,
       ...(item.startPublishedDate ? { startPublishedDate: item.startPublishedDate } : {}),
-      contents: CONTENT_OPTIONS,
-    })));
+      contents: { highlights: true, text: { maxCharacters: 1200 } },
+    }, 8_200)));
     const successful = settled.flatMap((result, index) => result.status === "fulfilled" ? [{ query: plan[index].query, results: result.value.results ?? [] }] : []);
     const failedQueries = settled.flatMap((result, index) => result.status === "rejected" ? [{ query: plan[index].query, error: result.reason instanceof Error ? result.reason.message : "Exa query failed." }] : []);
     if (!successful.length) {
@@ -166,9 +141,19 @@ export async function POST(request: Request) {
       throw new Error(messages.length ? messages.join(" ") : "Exa returned no successful search responses.");
     }
 
+    const canonicalUrl = (value: string) => {
+      try {
+        const url = new URL(value);
+        url.hash = "";
+        for (const key of [...url.searchParams.keys()]) if (/^(utm_|ref$|source$|trk$|campaign$)/i.test(key)) url.searchParams.delete(key);
+        url.hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+        url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+        return url.toString().replace(/\/$/, "").toLowerCase();
+      } catch { return value.replace(/\/$/, "").toLowerCase(); }
+    };
     const merged = new Map<string, ExaPage>();
     for (const run of successful) for (const page of run.results) {
-      const key = String(page.url ?? "").replace(/\/$/, "").toLowerCase();
+      const key = canonicalUrl(String(page.url ?? ""));
       if (!key) continue;
       const prior = merged.get(key);
       if (!prior) merged.set(key, page);
@@ -177,20 +162,13 @@ export async function POST(request: Request) {
     const rawPages = [...merged.values()];
     const looksPromising = (page: ExaPage) => /\b(intern(ship)?|trainee(ship)?|summer student|student|research assistant|thesis|diplomity[oö]|gradutoimeksianto|harjoittel\w*|kesäty\w*|junior|entry[- ]level|fellowship|scholarship|careers|how to apply)\b/i.test(`${page.title ?? ""} ${page.url ?? ""} ${page.text ?? ""} ${(page.highlights ?? []).join(" ")}`)
       && !/linkedin\.com\/in\/|\/people\/|\/staff\/|\/profile\//i.test(`${page.url ?? ""} ${page.title ?? ""}`);
-    const contentCandidates = rawPages.filter(looksPromising).slice(0, 30);
     const contentFailures: string[] = [];
     const contentByUrl = new Map<string, ExaPage>();
-    if (contentCandidates.length) {
-      try {
-        const response = await exaRequest<{ results?: ExaPage[] }>("/contents", { urls: contentCandidates.map((page) => page.url).filter((url): url is string => Boolean(url)), ...CONTENT_OPTIONS });
-        for (const page of response.results ?? []) if (page.url) contentByUrl.set(page.url.replace(/\/$/, "").toLowerCase(), page);
-      } catch (error) {
-        contentFailures.push(error instanceof Error ? error.message : "Exa could not retrieve candidate pages.");
-      }
-    }
+    // Discovery stays lightweight with Exa Search highlights; full Contents scraping
+    // is reserved for /api/investigate to keep broad searches fast.
 
     const sourceReviews = rawPages.map((raw) => {
-      const url = String(raw.url ?? "").replace(/\/$/, "").toLowerCase();
+      const url = canonicalUrl(String(raw.url ?? ""));
       const pageContent = contentByUrl.get(url);
       const searchText = [raw.text, ...(raw.highlights ?? []), raw.summary].filter((value): value is string => Boolean(value)).join("\n");
       const fullText = pageContent ? [pageContent.text, ...(pageContent.highlights ?? []), pageContent.summary].filter((value): value is string => Boolean(value)).join("\n") : searchText;
@@ -201,6 +179,9 @@ export async function POST(request: Request) {
       const legitimacy = isLegitimateOpportunitySource(raw.url ?? "", raw.title ?? "", fullText);
       if (classification.category === "specific-opportunity" && !legitimacy.legitimate) {
         classification = { ...classification, category: "irrelevant", availability: null, reason: legitimacy.reason };
+      }
+      if (classification.category === "specific-opportunity" && classification.availability === "Unverified" && legitimacy.quality === "official" && (classification.generalProgram || classifyOpportunity(raw.title ?? "", fullText).eligible)) {
+        classification = { ...classification, availability: "Verified", reason: "A specific student opportunity was found on a legitimate first-party or hiring-platform source; confirm details on the linked page." };
       }
       return { raw, pageContent, fullText, classification, legitimacy };
     });
@@ -253,7 +234,7 @@ export async function POST(request: Request) {
       return [{ ...item, status: opportunityAvailabilityStatus(availabilityStatus), availabilityStatus, qualificationStatus: qualifiesAsVerified ? "Verified" as const : undefined, sourceQuality, sourceQualityNote, confirmationNote, applicationStatus, applicationNote, classificationReason: classification.reason, classificationEvidence: evidence, source: { ...item.source, excerpt: evidence } }];
     });
 
-    const constraints = parseSearchConstraints(query, body.profile ?? {});
+    const constraints = parseSearchConstraints(query, {});
     const constrained = specificCandidates.map((item) => {
       const fullText = `${item.title} ${item.summary} ${verifiedTextById.get(item.id) ?? item.source.excerpt}`;
       const deadline = parseOpportunityDeadline(fullText, [], now.toISOString().slice(0, 10));
@@ -277,7 +258,7 @@ export async function POST(request: Request) {
     const extracted = await extractWithOpenAI(eligible, query);
     const ranked = extracted.map((item) => {
       const match = explainOpportunityMatch(item, body.profile ?? {}, query);
-      return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, studyFieldMatch: match.studyFieldMatch, studyFieldLabel: match.studyFieldLabel, profileRelevanceBoost: match.profileRelevanceBoost, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
+      return { ...item, match: match.score, scoreBreakdown: match.scoreBreakdown, matchReason: match.reason, matchedSkills: match.matchedSkills, matchedTopics: match.matchedTopics, studyFieldMatch: match.studyFieldMatch, studyFieldLabel: match.studyFieldLabel, profileRelevanceBoost: match.profileRelevanceBoost, recommendationReason: match.recommendationReason, locationMatch: match.locationMatch, locationLabel: match.locationInfo.label, locationSnippet: match.locationInfo.snippet, eligibilityStatus: item.eligibilityStatus ?? match.eligibilityStatus, missingInfo: match.missingInfo };
     });
     const closedResults = ranked.filter((item) => item.availabilityStatus === "Closed");
     const unverifiedOpportunities = ranked.filter((item) => item.availabilityStatus === "Unverified");
@@ -299,6 +280,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       opportunities: officialActive,
+      totalCandidates: officialActive.length + confirmationOpportunities.length,
       confirmationOpportunities,
       closedOpportunities: closedResults,
       unverifiedOpportunities,

@@ -83,6 +83,7 @@ export function classifyOpportunityPreview(input: { title: string; url: string; 
       : "The Exa search preview suggests a specific student role, but the original page was unavailable to verify its details or current availability.",
     evidenceExcerpt,
     applicationRoute: sourceResult.applicationRoute,
+    generalProgram: sourceResult.generalProgram,
   };
 }
 

@@ -19,6 +19,9 @@
 .role-badge{color:#2563EB;background:#EFF6FF}
 .published-badge{color:#0F172A;background:#F8FAFC}
 .field-priority-badge{border-radius:12px;padding:4px 8px;font-size:13px;color:#0F766E;background:#F0FDFA;border:1px solid #CCFBF1}
+.recommendation-reason{margin:0 0 10px;color:#475569;font-size:14px}
+.show-more-opportunities{display:block;margin:18px auto 8px;padding:12px 20px;border:1px solid #CBD5E1;border-radius:12px;background:#fff;color:#1D4ED8;font-weight:650;cursor:pointer}
+.show-more-opportunities:hover{background:#EFF6FF;border-color:#93C5FD}
 .document-upload-row{display:grid;grid-template-columns:minmax(150px,.32fr) minmax(0,1fr);align-items:end;gap:12px}
 .document-upload-row .upload{min-height:48px}
 .document-list{display:grid;gap:9px;margin-top:12px}

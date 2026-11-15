@@ -188,18 +188,31 @@ export function matchesStudentProfile(title: string, type: string, text: string,
 export function profileOpportunityPriority(item: Partial<Opportunity>, profile: Partial<Profile>) {
   const corpus = normalize(`${item.title ?? ""} ${item.summary ?? ""} ${item.source?.excerpt ?? ""}`).replace(/[^\p{L}\p{N}]+/gu, " ");
   const field = normalize(profile.field ?? "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const fieldTranslations: Array<[RegExp, string[]]> = [
+    [/business|kauppatiete|management|finance|marketing|econom/i, ["business", "kauppatieteet", "finance", "consulting", "marketing", "management", "commercial"]],
+    [/engineer|tekniik|engineering|mechanical|industrial|tuotantotalous/i, ["engineering", "tekniikka", "mechanical", "industrial", "manufacturing", "tuotantotalous"]],
+    [/computer|software|information technology|\bit\b|data science|artificial intelligence|\bai\b/i, ["computer science", "software", "information technology", "data science", "artificial intelligence", "tietotekniikka"]],
+    [/law|legal|oikeustie/i, ["law", "legal", "oikeustiede", "compliance"]],
+    [/life science|biology|biotech|biomedical|biochem|medicine|health/i, ["life sciences", "biology", "biotechnology", "biomedical", "biochemistry", "health sciences"]],
+  ];
+  const expandedField = fieldTranslations.find(([pattern]) => pattern.test(field))?.[1] ?? [];
   const fieldTerms = field.split(/\s+/).filter((term) => term.length > 2 && !["and", "the", "of", "in"].includes(term));
   const matchedFieldTerms = fieldTerms.filter((term) => corpus.includes(term));
-  const studyFieldMatch = Boolean(field && (corpus.includes(field) || (matchedFieldTerms.length >= Math.min(2, fieldTerms.length) && matchedFieldTerms.length / Math.max(1, fieldTerms.length) >= 0.5)));
-  const studyFieldBoost = studyFieldMatch ? (corpus.includes(field) ? 30 : 22) : 0;
+  const matchedFieldPhrases = expandedField.filter((term) => corpus.includes(normalize(term)));
+  const exactFieldMatch = Boolean(field && corpus.includes(field));
+  const studyFieldMatch = Boolean(field && (exactFieldMatch || (matchedFieldTerms.length >= Math.min(2, fieldTerms.length) && matchedFieldTerms.length / Math.max(1, fieldTerms.length) >= 0.5) || matchedFieldPhrases.length));
+  const studyFieldBoost = studyFieldMatch ? (exactFieldMatch ? 30 : matchedFieldPhrases.length ? 26 : 22) : 0;
   const skills = (profile.skills ?? "").split(/[,;\n]/).map((value) => normalize(value.trim()).replace(/[^\p{L}\p{N}]+/gu, " ").trim()).filter((value) => value.length > 2);
   const matchedSkills = [...new Set(skills.filter((skill) => corpus.includes(skill)))];
-  const backgroundTerms = [profile.interests, profile.experience, profile.notes, profile.degree]
+  const backgroundTerms = [profile.interests, profile.experience, profile.notes, profile.degree, profile.level, profile.cvText]
     .flatMap((value) => normalize(value ?? "").split(/[^\p{L}\p{N}]+/u))
     .filter((term) => term.length > 4 && !["student", "university", "experience", "project", "projects", "interested", "interest"].includes(term));
   const matchedBackground = [...new Set(backgroundTerms.filter((term) => corpus.includes(term)))];
   const profileRelevanceBoost = studyFieldBoost + Math.min(18, matchedSkills.length * 5) + Math.min(12, matchedBackground.length * 2);
-  return { studyFieldMatch, studyFieldLabel: studyFieldMatch ? profile.field?.trim() : undefined, profileRelevanceBoost, matchedProfileSkills: matchedSkills, matchedBackgroundTerms: matchedBackground };
+  const recommendationReason = studyFieldMatch
+    ? `Relevant to ${profile.field?.trim() || "your study field"}${matchedSkills.length ? ` · ${matchedSkills.slice(0, 2).join(", ")} match` : ""}`
+    : matchedSkills.length ? `Matches your skills: ${matchedSkills.slice(0, 3).join(", ")}` : undefined;
+  return { studyFieldMatch, studyFieldLabel: studyFieldMatch ? profile.field?.trim() : undefined, profileRelevanceBoost, recommendationReason, matchedProfileSkills: matchedSkills, matchedBackgroundTerms: matchedBackground };
 }
 
 export function explainOpportunityMatch(item: Partial<Opportunity>, profile: Partial<Profile>, query = "") {

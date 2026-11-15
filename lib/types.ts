@@ -58,6 +58,7 @@ export type Opportunity = {
   studyFieldMatch?: boolean;
   studyFieldLabel?: string;
   profileRelevanceBoost?: number;
+  recommendationReason?: string;
   scoreBreakdown?: { base: number; topicSkill: number; studentRole: number; location: number; openStatus: number; missingLocation: number; missingDeadline: number; constraintConflict: number; clampAdjustment: number };
   eligibilityStatus?: string;
   applicationStatus?: string;
